@@ -1,0 +1,5 @@
+#!/bin/sh
+# Agent-facing CLI for code-review.nvim. Requires Neovim >= 0.10 on PATH.
+self=$(readlink -f "$0" 2>/dev/null || echo "$0")
+dir=$(cd "$(dirname "$self")" && pwd)
+exec "${NVIM_CODE_REVIEW_NVIM:-nvim}" --clean -l "$dir/code-review.lua" "$@"
