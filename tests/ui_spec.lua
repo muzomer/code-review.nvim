@@ -225,3 +225,80 @@ describe("ui without a git repo", function()
     eq(store.read(dir).threads[1].file, "sub/deep/f.lua")
   end)
 end)
+
+describe("thread float navigation", function()
+  it("steps to the next/previous thread without closing the float", function()
+    local lines = { "a", "b", "c", "d", "e" }
+    local root = tmp_project({ ["nav.lua"] = lines })
+    for _, l in ipairs({ 2, 4 }) do
+      store.update(root, function(d)
+        return store.add_thread(d, {
+          file = "nav.lua", start = l, ["end"] = l,
+          anchor = anchor.capture(lines, l, l), author = "user", body = "comment on " .. l,
+        })
+      end)
+    end
+    vim.cmd.edit(root .. "/nav.lua")
+    local src = api.nvim_get_current_win()
+    api.nvim_win_set_cursor(0, { 2, 0 })
+    ac.command({ fargs = { "open" } })
+    local function shown()
+      return table.concat(api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    end
+    local function press(keys)
+      api.nvim_feedkeys(api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+    end
+    assert(shown():find("comment on 2", 1, true))
+    press("n")
+    assert(api.nvim_get_current_win() ~= src, "focus stays in a float")
+    assert(shown():find("comment on 4", 1, true), shown())
+    eq(api.nvim_win_get_cursor(src)[1], 4) -- source cursor followed
+    press("n") -- wraps
+    assert(shown():find("comment on 2", 1, true), shown())
+    press("[r")
+    assert(shown():find("comment on 4", 1, true), shown())
+    press("p")
+    assert(shown():find("comment on 2", 1, true), shown())
+    eq(#vim.tbl_filter(function(w)
+      return api.nvim_win_get_config(w).relative ~= ""
+    end, api.nvim_list_wins()), 1) -- old floats are closed, not stacked
+    press("q")
+  end)
+end)
+
+describe("thread float navigation across files", function()
+  it("N/P step through threads of all files in file/line order", function()
+    local a_lines, b_lines = { "a1", "a2", "a3" }, { "b1", "b2", "b3" }
+    local root = tmp_project({ ["a.lua"] = a_lines, ["b.lua"] = b_lines })
+    local function add(file, lines, l)
+      store.update(root, function(d)
+        return store.add_thread(d, {
+          file = file, start = l, ["end"] = l,
+          anchor = anchor.capture(lines, l, l), author = "user", body = file .. ":" .. l,
+        })
+      end)
+    end
+    add("b.lua", b_lines, 2)
+    add("a.lua", a_lines, 3)
+    add("a.lua", a_lines, 1)
+    vim.cmd.edit(root .. "/a.lua")
+    local src = api.nvim_get_current_win()
+    api.nvim_win_set_cursor(0, { 1, 0 })
+    ac.command({ fargs = { "open" } })
+    local function press(keys)
+      api.nvim_feedkeys(api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+    end
+    local function at()
+      local body = api.nvim_buf_get_lines(0, -2, -1, false)[1] -- last message line
+      local file = vim.fn.fnamemodify(api.nvim_buf_get_name(api.nvim_win_get_buf(src)), ":t")
+      return { file, api.nvim_win_get_cursor(src)[1], body }
+    end
+    eq(at(), { "a.lua", 1, "a.lua:1" })
+    press("N"); eq(at(), { "a.lua", 3, "a.lua:3" })
+    press("N"); eq(at(), { "b.lua", 2, "b.lua:2" }) -- crosses into the next file
+    press("N"); eq(at(), { "a.lua", 1, "a.lua:1" }) -- wraps around the project
+    press("P"); eq(at(), { "b.lua", 2, "b.lua:2" })
+    press("2P"); eq(at(), { "a.lua", 1, "a.lua:1" }) -- count
+    press("q")
+  end)
+end)

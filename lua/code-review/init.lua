@@ -393,6 +393,7 @@ function M.open_thread(root, tid, refresh)
     if float and api.nvim_win_is_valid(float.win) then
       api.nvim_win_close(float.win, true)
     end
+    local src_win = api.nvim_get_current_win()
     buf = api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].filetype = "markdown" -- treesitter / render-markdown.nvim
@@ -405,7 +406,7 @@ function M.open_thread(root, tid, refresh)
       height = math.min(#lines, math.floor(vim.o.lines / 2)),
       border = "rounded",
       title = " " .. t.id .. " ",
-      footer = " r reply · x resolve/reopen · d delete · q close ",
+      footer = " n/p next/prev · N/P across files · r reply · x resolve · d delete · q close ",
       footer_pos = "right",
       style = "minimal",
     })
@@ -420,6 +421,28 @@ function M.open_thread(root, tid, refresh)
     vim.keymap.set("n", "r", function() M.reply(root, tid) end, o)
     vim.keymap.set("n", "x", function() M.toggle_resolved(root, tid) end, o)
     vim.keymap.set("n", "d", function() M.delete(root, tid) end, o)
+    -- Step to the neighbouring thread in the source buffer without closing.
+    local function step(dir)
+      if not api.nvim_win_is_valid(src_win) then
+        return
+      end
+      local count = vim.v.count1
+      api.nvim_set_current_win(src_win)
+      M.jump(dir, count)
+      local r2, t2 = M.thread_at_cursor()
+      if t2 then
+        M.open_thread(r2, t2)
+      end
+    end
+    local km = M.config.keymaps or {}
+    for _, key in ipairs({ "n", km.next or "]r" }) do
+      vim.keymap.set("n", key, function() step(1) end, o)
+    end
+    for _, key in ipairs({ "p", km.prev or "[r" }) do
+      vim.keymap.set("n", key, function() step(-1) end, o)
+    end
+    vim.keymap.set("n", "N", function() M.step_project(src_win, root, tid, 1, vim.v.count1) end, o)
+    vim.keymap.set("n", "P", function() M.step_project(src_win, root, tid, -1, vim.v.count1) end, o)
   end
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -427,6 +450,77 @@ function M.open_thread(root, tid, refresh)
   if refresh then
     api.nvim_win_set_height(win, math.min(#lines, math.floor(vim.o.lines / 2)))
   end
+end
+
+---Visible threads of the project in review order: by file, then line.
+local function project_threads(root)
+  local data = safe_read(root)
+  local res = {}
+  for _, t in ipairs(data and data.threads or {}) do
+    if t.status ~= "resolved" or M.config.show_resolved then
+      res[#res + 1] = t
+    end
+  end
+  table.sort(res, function(a, b)
+    if a.file ~= b.file then
+      return a.file < b.file
+    end
+    return a.range.start < b.range.start
+  end)
+  return res
+end
+
+---Where a thread currently is in `buf` (1-based line): its live extmark if
+---rendered, else its stored range.
+local function thread_line(buf, t)
+  for id, tid in pairs(marks[buf] or {}) do
+    if tid == t.id then
+      local pos = api.nvim_buf_get_extmark_by_id(buf, ns, id, {})
+      if pos[1] then
+        return pos[1] + 1
+      end
+    end
+  end
+  return t.range.start
+end
+
+---Open the thread `count` steps after (dir = 1) or before (dir = -1) `tid`
+---across all files of the project, wrapping around. The file opens in
+---`src_win` and the thread float follows.
+function M.step_project(src_win, root, tid, dir, count)
+  if not api.nvim_win_is_valid(src_win) then
+    return
+  end
+  local list = project_threads(root)
+  if #list == 0 then
+    return notify("no comments in this project")
+  end
+  local idx
+  for i, t in ipairs(list) do
+    if t.id == tid then
+      idx = i
+      break
+    end
+  end
+  idx = idx or (dir > 0 and 0 or 1)
+  local t = list[((idx - 1 + dir * math.max(1, count or 1)) % #list) + 1]
+
+  api.nvim_set_current_win(src_win)
+  local path = root .. "/" .. t.file
+  if vim.fs.normalize(api.nvim_buf_get_name(0)) ~= path then
+    vim.cmd("normal! m'")
+    local ok, err = pcall(vim.cmd.edit, vim.fn.fnameescape(path))
+    if not ok then
+      return notify(tostring(err), vim.log.levels.ERROR)
+    end
+  else
+    vim.cmd("normal! m'")
+  end
+  local buf = api.nvim_get_current_buf()
+  local line = math.max(1, math.min(thread_line(buf, t), api.nvim_buf_line_count(buf)))
+  api.nvim_win_set_cursor(src_win, { line, 0 })
+  vim.cmd("normal! ^")
+  M.open_thread(root, t.id)
 end
 
 -- Actions -------------------------------------------------------------------------

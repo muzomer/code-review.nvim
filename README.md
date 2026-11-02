@@ -52,7 +52,10 @@ from `:terminal` find it.
 | `:CodeReview delete`       | delete the thread under the cursor                 |
 | `:CodeReview refresh`      | re-anchor and redraw all buffers                   |
 
-In the thread window: `r` reply, `x` resolve/reopen, `d` delete, `q` close.
+In the thread window: `n` / `p` (or `]r` / `[r`) show the next / previous
+thread in the file without closing the window, `N` / `P` do the same across
+all files of the project (by file, then line), `r` reply, `x` resolve/reopen,
+`d` delete, `q` close.
 In the input window: `<C-s>` (or `<CR>` in normal mode) submits, `q` cancels.
 
 When an agent replies, signs and virtual text update live and you get a
