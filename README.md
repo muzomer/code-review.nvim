@@ -18,12 +18,23 @@ Requires Neovim ≥ 0.10. No dependencies.
 
 ```lua
 -- lazy.nvim
-{ "you/code-review.nvim", opts = {} }
--- or: require("code-review").setup()
+{ "muzomer/code-review.nvim", opts = {} }
+
+-- vim.pack (Neovim ≥ 0.12)
+vim.pack.add({ "https://github.com/muzomer/code-review.nvim" })
+require("code-review").setup()
 ```
 
-For agents running outside Neovim, put `bin/` on your `PATH`
-(`ln -s /path/to/code-review.nvim/bin/code-review ~/.local/bin/`).
+For agents running outside Neovim, put `bin/code-review` on your `PATH`. The
+plugin directory depends on your plugin manager:
+
+```sh
+# lazy.nvim
+ln -s ~/.local/share/nvim/lazy/code-review.nvim/bin/code-review ~/.local/bin/
+# vim.pack
+ln -s ~/.local/share/nvim/site/pack/core/opt/code-review.nvim/bin/code-review ~/.local/bin/
+```
+
 Inside Neovim the plugin prepends `bin/` to `$PATH` for you, so agents started
 from `:terminal` find it.
 
@@ -68,7 +79,9 @@ Give your agent the instructions once: copy `skills/nvim-code-review` to
 
 ### Telling Claude Code about new comments automatically
 
-Add a `UserPromptSubmit` hook to `~/.claude/settings.json`:
+Add a `UserPromptSubmit` hook to `~/.claude/settings.json`. Use the
+`bin/code-review` path from [Install](#install), or just `code-review hook` if
+it is on your `PATH`:
 
 ```json
 "hooks": {
@@ -135,3 +148,7 @@ Highlights: `CodeReviewNeedsAgent`, `CodeReviewNeedsUser`,
 ```sh
 make test   # nvim --clean -l tests/run.lua
 ```
+
+## License
+
+MIT
