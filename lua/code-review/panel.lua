@@ -52,6 +52,9 @@ end
 
 local function input_bar()
   local km = state and state.edit and "edit your last message" or "reply"
+  if cr().config.auto_poke then
+    return string.format(" %s · <C-s> send + poke the agent · <M-s> send only ", km)
+  end
   return string.format(" %s · <C-s> send · <M-s> send + poke the agent ", km)
 end
 
@@ -142,7 +145,9 @@ function M.edit_last()
 end
 
 ---Send what is in the input box: a reply (or the edit), optionally poking the agent.
-function M.send(poke)
+---@param alt boolean <M-s>: the opposite of <C-s> (which pokes only with config.auto_poke)
+function M.send(alt)
+  local poke = alt ~= (cr().config.auto_poke == true)
   if not M.is_open() then
     return
   end

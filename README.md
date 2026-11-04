@@ -46,8 +46,7 @@ from `:terminal` find it.
 | `<leader>cr`                  | open the thread under the cursor                   |
 | `<leader>cx`                  | resolve / reopen the thread under the cursor       |
 | `]r` / `[r` (`:CodeReview next/prev`) | next / previous thread in the buffer (wraps, takes a count) |
-| `<leader>cl` / `<leader>cL`   | open / all (incl. resolved) threads in the project → quickfix |
-| `:CodeReview list [all]`   | same as above                                      |
+| `<leader>cl` / `<leader>cL` (`:CodeReview list [all]`) | open / all (incl. resolved) threads in the project → quickfix |
 | `:CodeReview copy`         | copy a prompt telling the agent to check comments  |
 | `:CodeReview delete`       | delete the thread under the cursor                 |
 | `:CodeReview refresh`      | re-anchor and redraw all buffers                   |
@@ -56,7 +55,9 @@ from `:terminal` find it.
 | `:CodeReview files`        | PR review: show / hide the file sidebar            |
 | `]u` / `[u`                | next / previous thread waiting for you (the agent replied), across files |
 | `<leader>ci` (`:CodeReview inline`) | show / hide whole conversations under the code |
-| `<leader>cp` / `<leader>cP` | poke the agent (herdr) / show its live output     |
+| `<leader>cp` / `<leader>cP` | poke the agent / show its live output (see [Poking the agent](#poking-the-agent)) |
+| `:CodeReview chat`         | open this review's background agent conversation in a terminal |
+| `:CodeReview stop`         | stop following the agent (and stop the background agent) |
 | `<leader>c?` (`?` in the sidebar and thread window) | the keys that work where you are |
 | `<leader>cu` (`:CodeReview layout [split\|unified]`) | PR review: side-by-side or one unified column (like GitHub) |
 | `<leader>cg` / `<leader>ct` (`:CodeReview find` / `threads [all]`) | pick a PR file / a thread, with preview (fzf-lua if installed) |
@@ -72,7 +73,11 @@ In the thread window: `e` edits your last message (until the agent replies). `n`
 thread in the file without closing the window, `N` / `P` do the same across
 all files of the project (by file, then line), `r` reply, `x` resolve/reopen,
 `d` delete, `q` close.
-In the input window: `<C-s>` (or `<CR>` in normal mode) submits, `q` cancels.
+In the input window: `<C-s>` (or `<CR>` in normal mode) saves, `<M-s>` saves
+and sends the comment to the agent right away (a new comment then opens its
+thread, so you see the reply arrive), `q` cancels. With `auto_poke = true` (or
+after `<leader>cA` / `:CodeReview autopoke`) the two swap: `<C-s>` sends,
+`<M-s>` only saves. The box footer shows which is which.
 
 When an agent replies, signs and virtual text update live and you get a
 notification. Sign colour shows whose turn it is: warning colour = the agent
@@ -127,16 +132,6 @@ with a ```` ```suggestion ```` block it is shown as a diff against the commented
 For lualine: `lualine_x = { require("code-review").lualine }` shows the PR, how far
 you are and what waits for you.
 
-Settings: `conversation` (`"float"` or `"panel"`), `mouse`, `flash_ms`,
-`notify_group_ms`, `diff_layout` (`"split"` or `"unified"`), `icons` (`"auto"`: file-type
-icons when nvim-web-devicons is installed), `sidebar_position` (`"left"`, `"right"`, `"bottom"` or `"top"`; move it
-while reviewing with `:CodeReview files bottom`), `sidebar_width` for left/right
-(default: a quarter of the screen, 24..42 columns), `sidebar_height` for
-bottom/top (default: 30% of the screen, 6..15 lines),
-`diff_colors` (`true`, `"github-dark"` or `false`), `inline_threads`,
-`progress_float` (`"auto"`: the agent's status goes in the winbar during a review,
-in a small floating window elsewhere).
-
 Files and state live under `stdpath("cache")` / `stdpath("state")` in
 `code-review/<host>/<owner>/<repo>/pr-<n>/`. GitHub Enterprise hosts work with
 the full URL.
@@ -162,6 +157,28 @@ Give your agent the instructions once: copy `skills/nvim-code-review` to
 `~/.claude/skills/` (Claude Code), or paste the output of
 `code-review skill` into `AGENTS.md`. Then say "check my comments", or use
 `:CodeReview copy`.
+
+### Poking the agent
+
+`<leader>cp` (or `<M-s>` when writing a comment) tells an agent to check your
+comments. Which agent:
+
+- **A Claude Code (or other) session running in [herdr](https://herdr.dev)**:
+  you pick it once per review and it is remembered. The prompt is typed into its
+  pane, so it must be open.
+- **The review's background agent**: `claude -p`, started without a terminal.
+  It is used when herdr is not there, when no agent runs in it, or when you pick
+  "claude (background)" in the list. The first poke starts a new Claude Code
+  session; later pokes `--resume` it, so the agent keeps what it learned about
+  the PR between pokes, even across Neovim restarts. The session id is in
+  `.code-review/headless.json` and runs start in the review root (Claude Code
+  files sessions by directory). A poke while it works is queued and runs when
+  it finishes. `<leader>cP` shows its output, `:CodeReview chat` opens the same
+  conversation interactively (`claude --resume <id>`).
+
+By default the background agent may only run the `code-review` CLI and read
+files (`Read`, `Grep`, `Glob`); it cannot change code. Widen that with
+`headless.allowed_tools` / `headless.permission_mode`.
 
 ### Telling Claude Code about new comments automatically
 
@@ -213,21 +230,85 @@ resolve, but cannot post as `user`, reopen, or delete. Those actions are yours.
 
 ## Configuration
 
+Every option with its default. Pass only the ones you change.
+
 ```lua
 require("code-review").setup({
-  keymaps = { -- set a key to false to skip it, or keymaps = false for none
-    add = "<leader>ca", open = "<leader>cr", resolve = "<leader>cx",
-    list = "<leader>cl", list_all = "<leader>cL", next = "]r", prev = "[r",
+  -- Keys. Set one to false to skip it, or `keymaps = false` for none.
+  keymaps = {
+    add = "<leader>ca",         -- comment on the line (normal) / selection (visual)
+    open = "<leader>cr",        -- open the thread under the cursor
+    edit = "<leader>ce",        -- edit your last comment, until the agent replies
+    resolve = "<leader>cx",     -- resolve / reopen
+    list = "<leader>cl",        -- open threads → quickfix
+    list_all = "<leader>cL",    -- all threads, resolved too → quickfix
+    next = "]r", prev = "[r",   -- next / previous thread in the buffer
+    next_yours = "]u", prev_yours = "[u", -- next / previous thread waiting for you
+    inline = "<leader>ci",      -- show / hide conversations under the code
+    panel = "<leader>cc",       -- threads in a float / in the conversation panel
+    find_file = "<leader>cg",   -- pick a PR file (fzf-lua if installed)
+    find_thread = "<leader>ct", -- pick a thread
+    poke = "<leader>cp",        -- tell the agent to check your comments
+    auto_poke = "<leader>cA",   -- toggle: <C-s> also sends to the agent
+    output = "<leader>cP",      -- show / hide the agent's live output
+    help = "<leader>c?",        -- the keys that work where you are
+    -- PR reviews
+    next_file = "]f", prev_file = "[f", -- next / previous unreviewed file
+    viewed = "<leader>cv",      -- mark the file viewed and move on
+    description = "<leader>cd", -- PR title and description
+    layout = "<leader>cu",      -- split / unified diff
+    recent = "<leader>cR",      -- resume a recent PR review
   },
-  show_resolved = false,
-  notify = true,
-  add_bin_to_path = true,
+
+  -- Threads
+  show_resolved = false,        -- show resolved threads in the code
   signs = { user = "▍", agent = "◆", resolved = "✓", outdated = "?" },
+  conversation = "float",       -- open threads in a "float" or a docked "panel"
+  panel_width = nil,            -- panel width (default: ~35% of the screen, 40..70)
+  inline_threads = false,       -- whole conversations under the code (toggle: keymaps.inline)
+  inline_max_lines = 12,        -- longest inline conversation before it is cut
+  mouse = true,                 -- click a sign to open its thread, a file in the sidebar to open it
+  flash_ms = 350,               -- highlight where a jump lands (0 / false: off)
+  notify = true,                -- notify when the agent replies
+  notify_group_ms = 1500,       -- replies within this window become one notification
+
+  -- Sending to the agent (see "Poking the agent")
+  agent = "auto",               -- "auto" (herdr agent, else background claude), "herdr", "headless"
+  auto_poke = false,            -- <C-s> also sends to the agent, <M-s> only saves
+  open_after_send = true,       -- a new comment sent to the agent opens its thread
+  headless = {                  -- the background agent
+    cmd = "claude",
+    allowed_tools = nil,        -- default { "Bash(code-review:*)", "Read", "Grep", "Glob" }
+    permission_mode = nil,      -- e.g. "acceptEdits" (with "Edit" allowed, for local reviews)
+    args = {},                  -- extra arguments for every run
+  },
+  progress = true,              -- show the agent's state after a poke (working / done / waiting)
+  progress_float = "auto",      -- true: floating window, false: winbar / statusline only,
+                                -- "auto": float only outside a PR review
+  progress_output = false,      -- also open the live output window on each poke
+  add_bin_to_path = true,       -- put bin/ on $PATH so agents started inside Neovim find the CLI
+
+  -- PR reviews
+  diff_layout = "split",        -- "split" (side by side) or "unified" (one column)
+  diff_colors = true,           -- true / "auto": from your colorscheme, "github-dark", false: Neovim's own
+  icons = "auto",               -- file-type icons: "auto" (with nvim-web-devicons), true, false
+  sidebar_position = "left",    -- "left", "right", "bottom", "top" (or :CodeReview files bottom)
+  sidebar_width = nil,          -- left / right (default: a quarter of the screen, 24..42)
+  sidebar_height = nil,         -- bottom / top (default: 30% of the screen, 6..15)
 })
 ```
 
-Highlights: `CodeReviewNeedsAgent`, `CodeReviewNeedsUser`,
-`CodeReviewAgent`, `CodeReviewVirt`, `CodeReviewDim`.
+Highlights are defined with `default = true`, so your colorscheme or your own
+`nvim_set_hl` wins. The ones you are most likely to change:
+
+| Group | Used for |
+| --- | --- |
+| `CodeReviewNeedsAgent` / `CodeReviewNeedsUser` | signs: waiting on the agent / on you |
+| `CodeReviewAgent`, `CodeReviewVirt`, `CodeReviewDim`, `CodeReviewOutdated` | agent threads, virtual text, resolved, outdated |
+| `CodeReviewAuthorYou` / `CodeReviewAuthorAgent` | names in conversations |
+| `CodeReviewDiffAdded` / `CodeReviewDiffRemoved` (+ `…Text`) | changed lines (and the changed part) in PR diffs |
+| `CodeReviewProgressWorking` / `…Done` / `…Blocked` | the agent's status after a poke |
+| `CodeReviewQfCurrent` | the open file in the sidebar |
 
 ## Development
 

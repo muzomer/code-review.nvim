@@ -1,9 +1,10 @@
 -- Follow the agent after a poke: a small status window (working / done /
 -- waiting for you) and an optional live view of its terminal output.
 --
--- Everything comes from herdr, polled once a second while a poke is being
--- followed:  `herdr agent get <pane>`  for the state and
---            `herdr agent read <pane>` for the terminal text.
+-- For a herdr agent everything comes from herdr, polled once a second while a
+-- poke is being followed:  `herdr agent get <pane>`  for the state and
+--                          `herdr agent read <pane>` for the terminal text.
+-- For the background agent (headless.lua) both come from its process.
 local store = require("code-review.store")
 local poke = require("code-review.poke")
 
@@ -244,23 +245,29 @@ function M.clean(text)
   return out
 end
 
+local function show_output(lines)
+  local h = api.nvim_win_get_height(out_win.win)
+  lines = vim.list_slice(lines, math.max(1, #lines - h + 1), #lines)
+  if #lines == 0 then
+    lines = { "(no output yet)" }
+  end
+  api.nvim_buf_set_lines(out_win.buf, 0, -1, false, lines)
+  pcall(api.nvim_win_set_cursor, out_win.win, { #lines, 0 })
+end
+
 local function refresh_output()
   if not valid(out_win) then
     return
   end
   local pane = out_win.pane_id
+  if pane == poke.HEADLESS then
+    return show_output(require("code-review.headless").lines(out_win.root))
+  end
   poke.run_async({ "herdr", "agent", "read", pane, "--lines", "80" }, function(res)
     if not valid(out_win) or out_win.pane_id ~= pane then
       return
     end
-    local lines = M.clean(res and res.stdout or "")
-    local h = api.nvim_win_get_height(out_win.win)
-    lines = vim.list_slice(lines, math.max(1, #lines - h + 1), #lines)
-    if #lines == 0 then
-      lines = { "(no output yet)" }
-    end
-    api.nvim_buf_set_lines(out_win.buf, 0, -1, false, lines)
-    pcall(api.nvim_win_set_cursor, out_win.win, { #lines, 0 })
+    show_output(M.clean(res and res.stdout or ""))
   end)
 end
 
@@ -301,7 +308,7 @@ function M.toggle_output(root)
   })
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
-  out_win = { buf = buf, win = win, pane_id = pane }
+  out_win = { buf = buf, win = win, pane_id = pane, root = state and state.root or root }
   refresh_output()
 end
 
@@ -408,6 +415,18 @@ function M.tick()
   if not st or st.finished or st.inflight then
     return
   end
+  if st.pane_id == poke.HEADLESS then
+    local h = require("code-review.headless").status(st.root)
+    if not h or h.status == "failed" then
+      local err = h and h.error or "the run is gone"
+      notify(st.title .. " failed: " .. err, vim.log.levels.ERROR)
+      finish(st, string.format("✗ %s · failed", st.title), "blocked")
+    else
+      -- the same record herdr gives: a turn is complete when the process ended
+      apply(st, { agent_status = h.status == "done" and "done" or "working", completion_seq = h.status == "done" and 1 or 0 })
+    end
+    return refresh_output()
+  end
   st.inflight = true
   poke.run_async({ "herdr", "agent", "get", st.pane_id }, function(res)
     st.inflight = false
@@ -448,7 +467,7 @@ function M.start(root, target, before)
     title = target.title,
     t0 = uv.hrtime(),
     baseline = baseline,
-    before = before,
+    before = before or (target.pane_id == poke.HEADLESS and { completion = 0 } or nil),
   }
   present(state, string.format("… %s · sent", target.title), "working")
   if M.use_timer then

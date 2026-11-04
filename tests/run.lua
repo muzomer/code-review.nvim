@@ -9,6 +9,11 @@ local sandbox = vim.fn.tempname()
 vim.env.NVIM_CODE_REVIEW_STATE = sandbox .. "/state"
 vim.env.NVIM_CODE_REVIEW_CACHE = sandbox .. "/cache"
 
+-- Never start a real `claude` from a test; headless_spec fakes the process.
+require("code-review.headless").available = function()
+  return false
+end
+
 local passed, failed, prefix = 0, 0, ""
 
 function _G.describe(name, fn)

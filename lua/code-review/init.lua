@@ -14,7 +14,8 @@ M.config = {
     add = "<leader>ca", -- normal: current line, visual: selection
     open = "<leader>cr", -- open thread under cursor (reply from there)
     edit = "<leader>ce", -- edit your last comment of the thread under the cursor
-    poke = "<leader>cp", -- poke the agent to check your comments (needs herdr)
+    poke = "<leader>cp", -- poke the agent to check your comments
+    auto_poke = "<leader>cA", -- toggle: <C-s> in the comment box also pokes the agent
     output = "<leader>cP", -- show / hide the live output of the agent you poked
     resolve = "<leader>cx", -- toggle resolved
     list = "<leader>cl", -- open threads in the project -> quickfix
@@ -47,7 +48,15 @@ M.config = {
   progress = true, -- after a poke, show the agent's state (working / done / waiting)
   progress_float = "auto", -- where: true = floating window, false = winbar/statusline only, "auto" = float only outside a PR review
   progress_output = false, -- ... and also open the live output window right away
-  auto_poke = false, -- poke the review agent (herdr) right after you add, reply or edit a comment
+  auto_poke = false, -- <C-s> in the comment box also pokes the agent (then <M-s> only saves); toggle: keymaps.auto_poke
+  open_after_send = true, -- after <M-s> on a new comment, open its thread to watch the reply come in
+  agent = "auto", -- who gets poked: "auto" (a herdr agent you pick, else the background agent), "herdr", "headless"
+  headless = { -- the background agent: `claude -p`, one resumable conversation per review
+    cmd = "claude",
+    allowed_tools = nil, -- default: code-review CLI + Read/Grep/Glob; add "Edit" etc. to let it change local code
+    permission_mode = nil, -- e.g. "acceptEdits"
+    args = {}, -- extra arguments
+  },
   icons = "auto", -- file-type icons in the file list: "auto" (when nvim-web-devicons is installed), true, false
   diff_layout = "split", -- PR diff: "split" (side by side) or "unified" (one column, like GitHub)
   sidebar_position = "left", -- PR review file list: "left", "right", "bottom" or "top"
@@ -654,6 +663,7 @@ end
 
 -- Floats ------------------------------------------------------------------------
 
+---@param on_submit fun(text: string, poke: boolean) poke = sent with <M-s>: also poke the agent
 ---@param initial? string text to start from (editing)
 local function input(title, on_submit, initial)
   local buf = api.nvim_create_buf(false, true)
@@ -675,7 +685,8 @@ local function input(title, on_submit, initial)
     col = 0,
     border = "rounded",
     title = " " .. title .. " ",
-    footer = " <C-s> / <CR> submit · q cancel ",
+    footer = M.config.auto_poke and " <C-s> / <CR> save + send to agent · <M-s> save only · q cancel "
+      or " <C-s> / <CR> save · <M-s> save + send to agent · q cancel ",
     footer_pos = "right",
   })
   if initial then
@@ -689,15 +700,17 @@ local function input(title, on_submit, initial)
     end
     vim.cmd.stopinsert()
   end
-  local function submit()
+  ---@param alt? boolean <M-s>: the opposite of what <C-s> does
+  local function submit(alt)
     local text = vim.trim(table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
     close()
     if text ~= "" then
-      on_submit(text)
+      on_submit(text, (alt == true) ~= (M.config.auto_poke == true))
     end
   end
   local o = { buffer = buf, nowait = true }
   vim.keymap.set({ "n", "i" }, "<C-s>", submit, o)
+  vim.keymap.set({ "n", "i" }, "<M-s>", function() submit(true) end, o)
   vim.keymap.set("n", "<CR>", submit, o)
   vim.keymap.set("n", "q", close, o)
   -- <Esc> only closes an empty draft, so a habitual double <Esc> loses nothing.
@@ -1040,8 +1053,9 @@ local HELP_GLOBAL = {
   { "find_file", "PR: pick a file (with preview)" },
   { "list", "open threads → quickfix" },
   { "list_all", "all threads, resolved too → quickfix" },
-  { "poke", "poke the agent to check your comments" },
+  { "poke", "poke the agent (herdr, else background claude)" },
   { "output", "show / hide the agent's live output" },
+  { "auto_poke", "toggle: <C-s> also sends to the agent" },
   { "next_file", "PR: next unreviewed file" },
   { "prev_file", "PR: previous unreviewed file" },
   { "viewed", "PR: mark the file viewed and move on" },
@@ -1071,7 +1085,7 @@ local HELP_CONTEXT = {
     keys = {
       { "n / p", "next / previous thread in the file" },
       { "N / P", "next / previous thread across files" },
-      { "r", "reply" },
+      { "r", "reply (in the box: <C-s> save, <M-s> save + send to agent)" },
       { "e", "edit your last message" },
       { "s", "send to the agent (poke)" },
       { "x", "resolve / reopen" },
@@ -1123,7 +1137,7 @@ function M.help_lines(context)
   section("Anywhere", rows)
   vim.list_extend(lines, {
     "Commands: :CodeReview pr <url> · recent · reload · since · files [left|right|bottom|top]",
-    "          · layout [split|unified] · panel · find · threads [all] · poke [pick] · inline · stop",
+    "          · layout [split|unified] · panel · find · threads [all] · poke [pick] · autopoke · chat · inline · stop",
     "",
   })
   return lines
@@ -1240,9 +1254,22 @@ function M.poke(root, opts)
   require("code-review.poke").send(root, M.prompt_for(root), opts)
 end
 
-local function maybe_poke(root)
-  if M.config.auto_poke then
+---Poke after a comment was saved, when it was sent to the agent (`now`: <M-s>,
+---or <C-s> with config.auto_poke).
+local function maybe_poke(root, now)
+  if now then
     M.poke(root)
+  end
+end
+
+---Turn automatic poking on <C-s> on or off.
+function M.toggle_auto_poke()
+  M.config.auto_poke = not M.config.auto_poke
+  notify(M.config.auto_poke and "<C-s> now saves and sends to the agent (<M-s>: save only)"
+    or "<C-s> now only saves (<M-s>: save and send to the agent)")
+  local panel = require("code-review.panel")
+  if panel.is_open() then
+    panel.render() -- its key hints follow the setting
   end
 end
 
@@ -1279,8 +1306,8 @@ function M.add(line1, line2)
   local pr = session.load(root)
   local base = side == "old" and pr and pr.base_sha or nil
   local where = side == "old" and " (old side)" or ""
-  input(string.format("Comment on %s:%d-%d%s", rel, line1, line2, where), function(body)
-    store.update(root, function(data)
+  input(string.format("Comment on %s:%d-%d%s", rel, line1, line2, where), function(body, now)
+    local tid = store.update(root, function(data)
       return store.add_thread(data, {
         file = rel,
         side = side,
@@ -1293,12 +1320,15 @@ function M.add(line1, line2)
       })
     end)
     after_write(root)
-    maybe_poke(root)
+    maybe_poke(root, now)
+    if now and M.config.open_after_send and tid then
+      M.open_thread(root, tid)
+    end
   end)
 end
 
 function M.reply(root, tid)
-  input("Reply to " .. tid, function(body)
+  input("Reply to " .. tid, function(body, now)
     store.update(root, function(data)
       local t = store.find(data, tid)
       if t then
@@ -1309,7 +1339,7 @@ function M.reply(root, tid)
       end
     end)
     after_write(root)
-    maybe_poke(root)
+    maybe_poke(root, now)
   end)
 end
 
@@ -1324,7 +1354,7 @@ function M.edit(root, tid)
   if not last or last.author ~= "user" then
     return notify("the agent has already replied; press r to reply instead", vim.log.levels.WARN)
   end
-  input("Edit your comment (" .. tid .. ")", function(body)
+  input("Edit your comment (" .. tid .. ")", function(body, now)
     local refused
     try_update(root, function(d)
       local t2 = store.find(d, tid)
@@ -1345,7 +1375,7 @@ function M.edit(root, tid)
     end
     after_write(root)
     if not refused then
-      maybe_poke(root)
+      maybe_poke(root, now)
     end
   end, last.body)
 end
@@ -1613,7 +1643,18 @@ local subcommands = {
     require("code-review.progress").toggle_output(session.infer(api.nvim_buf_get_name(0)) or current_root())
   end,
   stop = function()
+    local root = session.infer(api.nvim_buf_get_name(0)) or current_root()
     require("code-review.progress").stop()
+    if root and require("code-review.headless").stop(root) then
+      notify("stopped the background agent")
+    end
+  end,
+  autopoke = function()
+    M.toggle_auto_poke()
+  end,
+  chat = function()
+    local root = session.infer(api.nvim_buf_get_name(0)) or require("code-review.diff").where() or current_root()
+    require("code-review.headless").chat(root)
   end,
   poke = function(o)
     local root = session.infer(api.nvim_buf_get_name(0)) or current_root()
@@ -1824,6 +1865,9 @@ function M.setup(opts)
   end
   if km.output then
     vim.keymap.set("n", km.output, function() subcommands.output() end, { desc = "Code review: live agent output" })
+  end
+  if km.auto_poke then
+    vim.keymap.set("n", km.auto_poke, M.toggle_auto_poke, { desc = "Code review: toggle sending comments to the agent on <C-s>" })
   end
   if km.poke then
     vim.keymap.set("n", km.poke, function() subcommands.poke() end, { desc = "Code review: poke the agent" })
