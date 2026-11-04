@@ -360,13 +360,20 @@ function M.chat(root)
   vim.cmd("botright vsplit")
   local buf = api.nvim_create_buf(false, true)
   api.nvim_win_set_buf(0, buf)
-  local job = vim.fn.jobstart(M.adapter().chat(M.command(), id), {
+  local opts = {
     cwd = root,
-    term = true,
     on_exit = function()
       chats[root] = nil
     end,
-  })
+  }
+  local cmd = M.adapter().chat(M.command(), id)
+  local job
+  if vim.fn.has("nvim-0.11") == 1 then
+    opts.term = true
+    job = vim.fn.jobstart(cmd, opts)
+  else
+    job = vim.fn.termopen(cmd, opts) -- Neovim 0.10: jobstart() has no `term` yet
+  end
   if job <= 0 then
     return notify("could not start " .. M.command(), vim.log.levels.ERROR)
   end

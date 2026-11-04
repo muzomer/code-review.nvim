@@ -4,13 +4,16 @@ Leave review comments on code in Neovim; AI agents read them, reply in threads,
 and resolve them through a small CLI. Threads live in a plain JSON file, so any
 agent that can run a shell command can take part — no MCP server or daemon.
 
-Inspired by [hunk](https://github.com/modem-dev/hunk) (an agent-facing JSON CLI).
+Inspired by [hunk](https://github.com/modem-dev/hunk).
 
 ![Asking an agent about code in Neovim: the answer arrives in a thread next to the code](demo/code-review.gif)
 
 ## Install
 
-Requires Neovim ≥ 0.10. No dependencies.
+Requires Neovim ≥ 0.10. No dependencies; PR reviews also need `curl`.
+Optional: [fzf-lua](https://github.com/ibhagwan/fzf-lua) (pickers with preview),
+[nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) (file icons),
+[herdr](https://herdr.dev) (poke agents running in other panes).
 
 ```lua
 -- lazy.nvim
@@ -36,55 +39,48 @@ from `:terminal` find it.
 
 ## Usage in Neovim
 
-| Key / command                                                                         | Action                                                                                                                                                                                                                                                                                                          |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `<leader>ca` (n / visual)                                                             | comment on the line / selection                                                                                                                                                                                                                                                                                 |
-| `<leader>cr`                                                                          | open the thread under the cursor                                                                                                                                                                                                                                                                                |
-| `<leader>cx`                                                                          | resolve / reopen the thread under the cursor                                                                                                                                                                                                                                                                    |
-| `]r` / `[r` (`:CodeReview next/prev`)                                                 | next / previous thread in the buffer (wraps, takes a count)                                                                                                                                                                                                                                                     |
-| `<C-l>` or `<leader>cl` / `<C-S-l>` or `<leader>cL` (`:CodeReview list [all\|yours]`) | toggle the thread list (quickfix; `q` closes it), those waiting for you first (`● waiting for you` / `○ waiting for agent`); `all` adds resolved ones, `yours` shows only yours. `<CR>` or a click on a thread jumps to it and opens its conversation; the thread keys below act on the thread under the cursor |
-| `:CodeReview copy`                                                                    | copy a prompt telling the agent to check comments                                                                                                                                                                                                                                                               |
-| `:CodeReview delete`                                                                  | delete the thread under the cursor                                                                                                                                                                                                                                                                              |
-| `:CodeReview refresh`                                                                 | re-anchor and redraw all buffers                                                                                                                                                                                                                                                                                |
-| `:CodeReview pr <url\|o/r#n>`                                                         | review a GitHub PR without a checkout                                                                                                                                                                                                                                                                           |
-| `]f` / `[f`                                                                           | PR review: next / previous unreviewed file (stops at the ends; works in the sidebar too)                                                                                                                                                                                                                        |
-| `:CodeReview files`                                                                   | PR review: show / hide the file sidebar                                                                                                                                                                                                                                                                         |
-| `]u` / `[u`                                                                           | next / previous thread waiting for you (the agent replied), across files                                                                                                                                                                                                                                        |
-| `<leader>ci` (`:CodeReview inline`)                                                   | show / hide whole conversations under the code                                                                                                                                                                                                                                                                  |
-| `<leader>cp` / `<leader>cP`                                                           | poke the agent / show its live output (see [Poking the agent](#poking-the-agent))                                                                                                                                                                                                                               |
-| `:CodeReview chat`                                                                    | open this review's background agent conversation in a terminal                                                                                                                                                                                                                                                  |
-| `:CodeReview stop`                                                                    | stop following the agent (and stop the background agent)                                                                                                                                                                                                                                                        |
-| `<leader>c?` (`?` in the sidebar, thread window and thread list)                      | the keys that work where you are                                                                                                                                                                                                                                                                                |
-| `<leader>cu` (`:CodeReview layout [split\|unified]`)                                  | PR review: side-by-side or one unified column (like GitHub)                                                                                                                                                                                                                                                     |
-| `<leader>cg` / `<leader>ct` (`:CodeReview find` / `threads [all]`)                    | pick a PR file / a thread, with preview (fzf-lua if installed)                                                                                                                                                                                                                                                  |
-| `<leader>cR` (`:CodeReview recent`)                                                   | resume a recent PR review from its snapshots (no network)                                                                                                                                                                                                                                                       |
-| `:CodeReview reload` (`U` in the sidebar)                                             | fetch the PR again after new commits; your last version is kept                                                                                                                                                                                                                                                 |
-| `:CodeReview since` (`S` in the sidebar)                                              | what changed since your last review (previous head → current head)                                                                                                                                                                                                                                              |
-| `<leader>cc` (`:CodeReview panel`)                                                    | threads in a float or in a docked conversation panel (`<C-s>` send, `<M-s>` send + poke)                                                                                                                                                                                                                        |
-| `<leader>cd` (`:CodeReview description`)                                              | PR review: show the PR title and description                                                                                                                                                                                                                                                                    |
-| `<leader>cv` (`:CodeReview viewed`)                                                   | PR review: mark the file viewed (or clear it) and move to the next unreviewed one                                                                                                                                                                                                                               |
-| `<leader>ce` (`:CodeReview edit`)                                                     | edit your last comment of the thread under the cursor, until the agent replies                                                                                                                                                                                                                                  |
+| Key / command                                          | Action                                                                                                       |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `<leader>ca` (normal / visual)                         | comment on the line / selection                                                                              |
+| `<leader>cr`                                           | open the thread under the cursor                                                                             |
+| `<leader>ce` (`:CodeReview edit`)                      | edit your last comment of the thread under the cursor, until the agent replies                               |
+| `<leader>cx`                                           | resolve / reopen the thread under the cursor                                                                 |
+| `:CodeReview delete`                                   | delete the thread under the cursor                                                                           |
+| `]r` / `[r`                                            | next / previous thread in the buffer (wraps, takes a count)                                                  |
+| `]u` / `[u`                                            | next / previous thread waiting for you (the agent replied), across files                                     |
+| `<C-l>` or `<leader>cl` (`:CodeReview list [yours]`)   | toggle the thread list (quickfix): those waiting for you first; `yours` shows only those                     |
+| `<C-S-l>` or `<leader>cL` (`:CodeReview list all`)     | the same with resolved threads                                                                               |
+| `<leader>ct` (`:CodeReview threads [all]`)             | pick a thread, with preview (fzf-lua if installed)                                                           |
+| `<leader>ci` (`:CodeReview inline`)                    | show / hide whole conversations under the code                                                               |
+| `<leader>cc` (`:CodeReview panel`)                     | open threads in a float or in a docked conversation panel                                                    |
+| `<leader>cp` (`:CodeReview poke [pick]`)               | send your comments to the agent; `pick` chooses the agent again (see [Poking the agent](#poking-the-agent)) |
+| `<leader>cA` (`:CodeReview autopoke`)                  | toggle: `<C-s>` in the comment box also sends to the agent                                                   |
+| `<leader>cP` (`:CodeReview output`)                    | show / hide the agent's live output                                                                          |
+| `:CodeReview chat`                                     | open the background agent's conversation in a terminal                                                       |
+| `:CodeReview stop`                                     | stop following the agent (and stop the background agent)                                                     |
+| `:CodeReview copy`                                     | copy a prompt telling the agent to check your comments                                                       |
+| `:CodeReview refresh`                                  | re-anchor and redraw all buffers                                                                             |
+| `<leader>c?` (`?` in the sidebar, threads, list, panel) | the keys that work where you are                                                                             |
 
-On a thread (the thread window, the thread list and the conversation panel):
-`r` or `i` reply, `e` edits your last message (until the agent replies), `s`
-sends to the agent (poke), `x` resolves / reopens, `d` deletes, `?` lists the
-keys, `q` or `<Esc>` closes. In the thread window `n` / `p` (or `]r` / `[r`)
-show the next / previous thread in the file without closing the window, `N` /
-`P` do the same across all files of the project (by file, then line). In the
-thread list the window stays open and updates as you go.
-In the input window: `<C-s>` (or `<CR>` in normal mode) saves, `<M-s>` saves
-and sends the comment to the agent right away (a new comment then opens its
-thread, so you see the reply arrive), `q` cancels. With `auto_poke = true` (or
-after `<leader>cA` / `:CodeReview autopoke`) the two swap: `<C-s>` sends,
-`<M-s>` only saves. The box footer shows which is which.
+On a thread (thread window, thread list, conversation panel):
 
-Every key here and in the table can be changed, given several keys or turned
+| Key                  | Action                                            |
+| -------------------- | ------------------------------------------------- |
+| `r` / `i`            | reply                                             |
+| `e`                  | edit your last message, until the agent replies   |
+| `s`                  | send to the agent                                 |
+| `x` / `d`            | resolve or reopen / delete                        |
+| `n` / `p`, `N` / `P` | next / previous thread in the file / across files |
+| `?` / `q`            | list the keys / close                             |
+
+In the thread list, `<CR>` or a click jumps to the thread and opens it; the list
+updates as you go. In the comment box, `<C-s>` (or `<CR>` in normal mode) saves,
+`<M-s>` saves and sends it to the agent, `q` cancels; `auto_poke` swaps the two
+sends, and the footer says which is which.
+
+Sign colours: warning = waiting for you, info = waiting for the agent; `◆` = an
+agent opened the thread. Every key can be changed, given several keys or turned
 off: see `keymaps` in [Configuration](#configuration).
-
-When an agent replies, signs and virtual text update live and you get a
-notification. Sign colour shows whose turn it is: warning colour = the agent
-replied and waits for you; info colour = waiting on the agent; `◆` marks threads
-an agent opened.
 
 ## Reviewing a PR (no checkout)
 
@@ -108,42 +104,23 @@ The changed files appear in a sidebar on the left, as a folder tree:
       A keys.py        +3       ✎1!
 ```
 
-`▶` is the file in the diff, `✓` a file you marked viewed, `M/A/D/R` its change,
-`✎2` its open threads and `!` threads waiting for you. In the sidebar `<CR>` opens
-a file (or folds a folder), `v` marks it viewed, `?` lists the keys and `q`
-hides it (`:CodeReview files` brings it back). The diff opens side by side,
-old on the left, new on the right; each side's winbar says which it is, the
-branch and commit, and where you are (`file 4/35 · ✓ viewed`). `]f` / `[f`
-step through the files that are not viewed yet. Comment with `<leader>ca` on **either side**.
-`<leader>cu` switches to a unified view: one column with old and new lines
-interleaved, old/new line numbers and `+`/`-` in the status column, long unchanged
-stretches folded (`⋯ 42 unchanged lines`) and `]c` / `[c` between changes;
-comments on a removed line go to the old side, on any other line to the new side.
-With `<leader>ci` whole conversations show under the code; the other pane gets
-blank lines in the same place, so the two sides stay aligned. Once every file
-is viewed you get a summary of the review.
-Threads on the left are tied to the base commit, so they survive and show up
-only on the old text. Comments stay on your machine; nothing is posted to GitHub.
+`▶` file in the diff · `✓` viewed · `M/A/D/R` change · `✎2` open threads · `!` waiting for you
 
-Opening a PR does not block: a PR you reviewed before opens at once from its
-snapshots (and is checked for new commits in the background; a banner says so);
-a new one opens as soon as its file list arrives and files fill in as they land.
-In the sidebar `f` filters (unviewed / with threads / waiting for you / changed since
-your last review). Jumps flash the line they land on; replies arriving together
-are announced together; a click on a thread's sign opens it. When an agent answers
-with a ` ```suggestion ` block it is shown as a diff against the commented code.
+| Key / command                                        | Action                                                                  |
+| ---------------------------------------------------- | ----------------------------------------------------------------------- |
+| `<CR>` / `v` / `f` (sidebar)                         | open a file / mark it viewed / filter the list                          |
+| `]f` / `[f`                                          | next / previous file not viewed yet (also in the sidebar)               |
+| `<leader>cv` (`:CodeReview viewed`)                  | mark the file viewed (or clear it) and move to the next one             |
+| `<leader>ca`                                         | comment, on either side                                                 |
+| `<leader>cu` (`:CodeReview layout [split\|unified]`) | side by side ↔ one unified column, like GitHub (`]c` / `[c`: changes) |
+| `<leader>cg` (`:CodeReview find`)                    | pick a changed file, with preview                                       |
+| `<leader>cd` (`:CodeReview description`)             | the PR title and description                                            |
+| `<leader>cR` (`:CodeReview recent`)                  | resume a recent PR review from its snapshots (no network)               |
+| `:CodeReview reload` (`U` in the sidebar)            | fetch the PR again after new commits; your last version is kept         |
+| `:CodeReview since` (`S` in the sidebar)             | what changed since your last review (previous head → current head)      |
+| `q` / `:CodeReview files`                            | hide / show the sidebar                                                 |
 
-For lualine: `lualine_x = { require("code-review").lualine }` shows the PR, how far
-you are and what waits for you.
-
-Files and state live under `stdpath("cache")` / `stdpath("state")` in
-`code-review/<host>/<owner>/<repo>/pr-<n>/`. GitHub Enterprise hosts work with
-the full URL.
-
-Agents have no checkout either, so they read the snapshots (`code-review --pr REF diff`
-prints the paths) and fetch any other file on demand (`code-review --pr REF file <path>`).
-`:CodeReview copy` copies a prompt that already contains the right `--pr REF`, and
-pokes send it too.
+Comments stay on your machine; nothing is posted to GitHub. A PR you reviewed before opens at once and is checked for new commits in the background. Agents read the same snapshots: `code-review --pr REF diff` prints their paths, `code-review --pr REF file <path>` fetches any other file. For lualine: `lualine_x = { require("code-review").lualine }`.
 
 ## Usage by agents
 
@@ -155,6 +132,7 @@ printf '%s' "$BODY" | code-review reply t_a3f9 -
 code-review resolve t_a3f9 "Fixed in utils.lua"
 code-review add src/foo.lua 40 44 "This is O(n^2); ok?"
 code-review skill                      # instructions for the agent
+code-review --pr acme/api#12 list      # a PR review: the same commands with --pr
 ```
 
 Give your agent the instructions once: copy `skills/nvim-code-review` to
@@ -220,6 +198,9 @@ e.g. to let it change code in a local review.
   the nearest `.git`/`.jj` or `$NVIM_CODE_REVIEW_ROOT`. The directory contains a
   `.gitignore` of `*`; delete it if you want to commit your comments. Writers take
   a lock file and write atomically, so Neovim and agents can write concurrently.
+  A PR review keeps its comments under Neovim's state directory
+  (`$NVIM_CODE_REVIEW_STATE`) and its file snapshots under the cache directory
+  (`$NVIM_CODE_REVIEW_CACHE`), one directory per PR.
 - **Threads**: `{id, file, range, anchor, status: open|resolved|outdated,
 needs: agent|user|none, messages: [{id, author, ts, body}]}`. `needs` is
   derived from the last message's author.
