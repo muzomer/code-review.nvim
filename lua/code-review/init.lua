@@ -139,6 +139,20 @@ end
 local pending_notes, note_timer = {}, nil
 
 ---Announce the collected replies now (one notification).
+---Cut a message to one screen line: a longer one makes Neovim stop at
+---"Press ENTER" (the whole reply is in the thread anyway).
+function M.one_line(msg)
+  local max = vim.o.columns - 15 -- room for the ruler / showcmd
+  if vim.fn.strdisplaywidth(msg) <= max then
+    return msg
+  end
+  local out = msg
+  while vim.fn.strdisplaywidth(out) > max - 1 do
+    out = vim.fn.strcharpart(out, 0, vim.fn.strchars(out) - 1)
+  end
+  return out .. "…"
+end
+
 function M.flush_notifications()
   if note_timer then
     note_timer:stop()
@@ -154,7 +168,7 @@ function M.flush_notifications()
   pending_notes = {}
   if #notes == 1 then
     local n = notes[1]
-    return vim.notify(string.format("code-review: %s on %s:%d: %s", n.author, n.file, n.line, n.text))
+    return vim.notify(M.one_line(string.format("code-review: %s on %s:%d: %s", n.author, n.file, n.line, n.text)))
   end
   local authors, where = {}, {}
   for _, n in ipairs(notes) do
@@ -163,7 +177,7 @@ function M.flush_notifications()
   end
   local who = vim.tbl_keys(authors)
   table.sort(who)
-  vim.notify(string.format("code-review: %s replied to %d threads: %s", table.concat(who, ", "), #notes, table.concat(where, ", ")))
+  vim.notify(M.one_line(string.format("code-review: %s replied to %d threads: %s", table.concat(who, ", "), #notes, table.concat(where, ", "))))
 end
 
 local function queue_notification(n)
@@ -904,26 +918,50 @@ function M.toggle_conversation()
 end
 
 ---Open (or refresh in place) the thread float.
----Footer of the thread window: its keys, as configured.
-function M.thread_footer()
+---Footer of the thread window: its keys, as configured, as many as fit in
+---`width` (the most useful first; `?` lists them all).
+function M.thread_footer(width)
   local tk = keys.group("thread")
-  local parts = {}
-  local function add(a, b, what)
-    local la, lb = keys.label(tk[a]), b and keys.label(tk[b])
-    if la or lb then
-      parts[#parts + 1] = (la and lb) and (la .. "/" .. lb .. " " .. what) or ((la or lb) .. " " .. what)
+  local function pair(a, b, what)
+    local la, lb = keys.label(tk[a]), keys.label(tk[b])
+    return (la and lb) and (la .. "/" .. lb .. " " .. what) or nil
+  end
+  local function one(name, what)
+    local k = keys.list(tk[name])[1]
+    return k and (k .. " " .. what) or nil
+  end
+  -- { text, priority }, in display order
+  local items = {
+    { pair("next", "prev", "next/prev"), 6 },
+    { pair("next_file", "prev_file", "across files"), 8 },
+    { one("reply", "reply"), 1 },
+    { one("edit", "edit"), 7 },
+    { one("send", "send"), 2 },
+    { one("resolve", "resolve"), 3 },
+    { one("delete", "delete"), 9 },
+    { one("help", "keys"), 4 },
+    { one("close", "close"), 5 },
+  }
+  local order = {}
+  for i, it in ipairs(items) do
+    if it[1] then
+      order[#order + 1] = i
     end
   end
-  add("next", "prev", "next/prev")
-  add("next_file", "prev_file", "across files")
-  add("reply", nil, "reply")
-  add("edit", nil, "edit")
-  add("send", nil, "send")
-  add("resolve", nil, "resolve")
-  add("delete", nil, "delete")
-  local h, c = keys.list(tk.help)[1], keys.list(tk.close)[1]
-  if h then parts[#parts + 1] = h .. " keys" end
-  if c then parts[#parts + 1] = c .. " close" end
+  table.sort(order, function(a, b) return items[a][2] < items[b][2] end)
+  local keep, used = {}, 2
+  for _, i in ipairs(order) do
+    local w = vim.fn.strdisplaywidth(items[i][1]) + 3
+    if not width or used + w <= width - 2 then
+      keep[i], used = true, used + w
+    end
+  end
+  local parts = {}
+  for i, it in ipairs(items) do
+    if keep[i] then
+      parts[#parts + 1] = it[1]
+    end
+  end
   return " " .. table.concat(parts, " · ") .. " "
 end
 
@@ -960,7 +998,7 @@ function M.open_thread(root, tid, refresh)
       height = math.min(#lines, math.floor(vim.o.lines / 2)),
       border = "rounded",
       title = " " .. t.id .. " ",
-      footer = M.thread_footer(),
+      footer = M.thread_footer(width),
       footer_pos = "right",
       style = "minimal",
     })

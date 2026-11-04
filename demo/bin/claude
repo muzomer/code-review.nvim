@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+# Stands in for `claude -p ... --output-format stream-json` in the demo: answers
+# every thread of the prompt through the real code-review CLI, no model involved.
+import json, os, re, subprocess, sys, time
+
+cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "bin", "code-review")
+prompt = sys.argv[sys.argv.index("-p") + 1]
+
+def emit(content):
+    print(json.dumps({"type": "assistant", "message": {"content": content}}), flush=True)
+
+REPLIES = [
+    ("elapsed", "It refills lazily, on each call, for the time that passed since the last one:\n\n"
+     "- `elapsed * self.rate`: tokens earned meanwhile (0.4 s at 5/s = 2 tokens)\n"
+     "- `min(self.capacity, ...)`: caps it, so a long idle time saves up one burst at most\n"
+     "- `self.updated = now`: the next call only counts the time after this one\n\n"
+     "No background timer is needed: the bucket is only brought up to date when someone asks."),
+    ("monotonic", "`time.time()` follows the wall clock, which can jump: NTP corrections, or someone setting the time.\n\n"
+     "A jump back makes `elapsed` negative and *removes* tokens; a jump forward refills the bucket at once.\n"
+     "`time.monotonic()` only moves forward, so `elapsed` is always the real time that passed."),
+]
+
+time.sleep(0.8)
+emit([{"type": "text", "text": "Reading the review comments."}])
+blocks = re.split(r"\n(?=\[t_)", prompt)
+for block in blocks:
+    m = re.match(r"\[(t_\w+)\]", block)
+    if not m:
+        continue
+    tid = m.group(1)
+    body = next((r for key, r in REPLIES if key in block), "Good question: see the code above.")
+    time.sleep(1.2)
+    emit([{"type": "tool_use", "name": "Bash", "input": {"command": "code-review reply %s ..." % tid}}])
+    subprocess.run([cli, "reply", tid, body, "--author", "claude"], check=True, stdout=subprocess.DEVNULL)
+time.sleep(0.5)
+emit([{"type": "text", "text": "Answered the review threads."}])
+print(json.dumps({"type": "result", "is_error": False, "result": "ok"}), flush=True)

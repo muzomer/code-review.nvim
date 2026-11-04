@@ -6,11 +6,7 @@ agent that can run a shell command can take part — no MCP server or daemon.
 
 Inspired by [hunk](https://github.com/modem-dev/hunk) (an agent-facing JSON CLI).
 
-```
-  12 ▍ local ok = pcall(load)       ▍ user: why swallow the error here?
-  13 │ if not ok then return end
-  40 ◆ for _, a in ipairs(xs) do    ◆ claude: this is O(n²) — ok?  (2)
-```
+![Asking an agent about code in Neovim: the answer arrives in a thread next to the code](demo/code-review.gif)
 
 ## Install
 
@@ -343,6 +339,10 @@ Highlights are defined with `default = true`, so your colorscheme or your own
 ```sh
 make test   # nvim --clean -l tests/run.lua
 ```
+
+The GIF above is recorded with [VHS](https://github.com/charmbracelet/vhs): `demo/record.sh`
+builds a throwaway project in `/tmp/api` and runs `demo/demo.tape`; a stand-in `claude`
+(`demo/bin/claude`) answers through the real CLI, so no model runs.
 
 ## License
 

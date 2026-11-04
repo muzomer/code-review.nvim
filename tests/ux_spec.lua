@@ -169,6 +169,13 @@ describe("UX", function()
       vim.notify = notify
       eq(notes, { "code-review: agent on src/calc.lua:4: only one" })
     end)
+
+    case("a long reply is cut to one line, so Neovim does not stop at Press ENTER", function()
+      local msg = ac.one_line("code-review: agent on a.lua:1: " .. string.rep("long words ", 40))
+      assert(vim.fn.strdisplaywidth(msg) <= vim.o.columns - 15, msg)
+      eq(vim.fn.strcharpart(msg, vim.fn.strchars(msg) - 1), "…")
+      eq(ac.one_line("short"), "short")
+    end)
   end)
 
   describe("file list filters", function()
