@@ -42,7 +42,7 @@ M.config = {
   notify = true, -- notify when an agent replies
   conversation = "float", -- open threads in a "float" (default) or a docked chat "panel" with an input box
   panel_width = nil, -- width of the conversation panel (default: ~35% of the screen, 40..70)
-  mouse = true, -- click a thread's sign to open it; click a file in the file list to open it
+  mouse = true, -- click a thread's sign or its line in the thread list to open it; click a file in the file list to open it
   notify_group_ms = 1500, -- replies arriving within this window become one notification
   flash_ms = 350, -- briefly highlight where a jump lands (0 / false: off)
   progress = true, -- after a poke, show the agent's state (working / done / waiting)
@@ -999,8 +999,13 @@ function M.step_project(src_win, root, tid, dir, count)
   end
   idx = idx or (dir > 0 and 0 or 1)
   local t = list[((idx - 1 + dir * math.max(1, count or 1)) % #list) + 1]
+  M.goto_thread(src_win, root, t)
+end
 
-  api.nvim_set_current_win(src_win)
+---Show thread `t` in `win` (the PR diff, or the file), cursor on its line, and
+---open its conversation.
+function M.goto_thread(win, root, t)
+  api.nvim_set_current_win(win)
   local path = session.thread_path(root, t)
   local pr = session.load(root)
   if pr and pr.kind == "pr" then
@@ -1016,9 +1021,8 @@ function M.step_project(src_win, root, tid, dir, count)
     vim.cmd("normal! m'")
   end
   local buf = api.nvim_get_current_buf()
-  src_win = api.nvim_get_current_win()
   local line = math.max(1, math.min(thread_line(buf, t), api.nvim_buf_line_count(buf)))
-  api.nvim_win_set_cursor(src_win, { line, 0 })
+  api.nvim_win_set_cursor(0, { line, 0 })
   vim.cmd("normal! ^")
   M.open_thread(root, t.id)
 end
@@ -1051,7 +1055,7 @@ local HELP_GLOBAL = {
   { "inline", "show / hide conversations under the code" },
   { "find_thread", "pick a thread (with preview)" },
   { "find_file", "PR: pick a file (with preview)" },
-  { "list", "open threads → quickfix" },
+  { "list", "open threads → quickfix (waiting for you first)" },
   { "list_all", "all threads, resolved too → quickfix" },
   { "poke", "poke the agent (herdr, else background claude)" },
   { "output", "show / hide the agent's live output" },
@@ -1137,7 +1141,7 @@ function M.help_lines(context)
   section("Anywhere", rows)
   vim.list_extend(lines, {
     "Commands: :CodeReview pr <url> · recent · reload · since · files [left|right|bottom|top]",
-    "          · layout [split|unified] · panel · find · threads [all] · poke [pick] · autopoke · chat · inline · stop",
+    "          · layout [split|unified] · panel · find · threads [all] · list [all|yours] · poke [pick] · autopoke · chat · inline · stop",
     "",
   })
   return lines
@@ -1422,44 +1426,163 @@ local function current_root()
   return root or store.find_root()
 end
 
-function M.list(all)
-  local root = current_root()
-  local data = safe_read(root)
-  if not data then
-    return
+---Whose turn a thread is, for lists: label, sort rank and quickfix type.
+---@return { label: string, rank: integer, type: string, yours: boolean }
+function M.waiting(t)
+  if t.status == "resolved" then
+    return { label = "✓ resolved", rank = 3, type = "", yours = false }
+  elseif t.needs == "user" then
+    return { label = "● waiting for you", rank = 0, type = "W", yours = true }
+  elseif t.needs == "agent" then
+    return { label = "○ waiting for agent", rank = 1, type = "I", yours = false }
   end
-  local threads = vim.deepcopy(data.threads)
-  table.sort(threads, function(a, b)
+  return { label = "· open", rank = 2, type = "", yours = false }
+end
+
+---Threads for a list, those waiting for you first, then by file and line.
+---@param mode? boolean|"all"|"yours" true / "all": resolved too; "yours": only waiting for you
+function M.list_threads(threads, mode)
+  local all = mode == true or mode == "all"
+  local res = {}
+  for _, t in ipairs(threads) do
+    local w = M.waiting(t)
+    if mode == "yours" and w.yours or mode ~= "yours" and (all or t.status ~= "resolved") then
+      res[#res + 1] = t
+    end
+  end
+  table.sort(res, function(a, b)
+    local ra, rb = M.waiting(a).rank, M.waiting(b).rank
+    if ra ~= rb then
+      return ra < rb
+    end
     if a.file ~= b.file then
       return a.file < b.file
     end
     return a.range.start < b.range.start
   end)
-  local items = {}
-  for _, t in ipairs(threads) do
-    if all or t.status ~= "resolved" then
-      local last = t.messages[#t.messages]
-      items[#items + 1] = {
-        filename = session.thread_path(root, t),
-        lnum = t.range.start,
-        end_lnum = t.range["end"],
-        text = string.format(
-          "[%s · needs %s%s] %s: %s",
-          t.status,
-          t.needs,
-          t.side == "old" and " · old side" or "",
-          last.author,
-          first_line(last.body)
-        ),
-        user_data = t.id,
-      }
-    end
+  return res
+end
+
+-- Color the turn labels in the quickfix window like the signs.
+local function color_qf(win)
+  for _, id in ipairs(vim.w[win].code_review_matches or {}) do
+    pcall(vim.fn.matchdelete, id, win)
   end
-  vim.fn.setqflist({}, " ", { title = "Code review", items = items })
+  vim.w[win].code_review_matches = {
+    vim.fn.matchadd("CodeReviewNeedsUser", [[● waiting for you]], 20, -1, { window = win }),
+    vim.fn.matchadd("CodeReviewNeedsAgent", [[○ waiting for agent]], 20, -1, { window = win }),
+    vim.fn.matchadd("CodeReviewDim", [[✓ resolved]], 20, -1, { window = win }),
+  }
+end
+
+-- Display rows of the thread lists, by quickfix list id: { loc, turn, rest }.
+local qf_rows = {}
+
+local function pad(text, width)
+  return text .. string.rep(" ", width - vim.fn.strdisplaywidth(text))
+end
+
+---quickfixtextfunc of the thread list: aligned columns (location, whose turn,
+---message), whatever the file name lengths and labels are.
+function M.qf_text(info)
+  local rows = qf_rows[info.id]
+  if not rows or info.quickfix ~= 1 then
+    return {}
+  end
+  local w_loc, w_turn = 0, 0
+  for _, r in ipairs(rows) do -- widths over the whole list, so every line agrees
+    w_loc = math.max(w_loc, vim.fn.strdisplaywidth(r.loc))
+    w_turn = math.max(w_turn, vim.fn.strdisplaywidth(r.turn))
+  end
+  local out = {}
+  for i = info.start_idx, info.end_idx do
+    local r = rows[i]
+    out[#out + 1] = r and (pad(r.loc, w_loc) .. "  " .. pad(r.turn, w_turn) .. "  " .. r.rest) or ""
+  end
+  return out
+end
+
+---Threads of the project in the quickfix list.
+---@param mode? boolean|"all"|"yours" true / "all": resolved too; "yours": only those waiting for you
+function M.list(mode)
+  local root = current_root()
+  local data = safe_read(root)
+  if not data then
+    return
+  end
+  local items, rows, yours, agent = {}, {}, 0, 0
+  for _, t in ipairs(M.list_threads(data.threads, mode)) do
+    local last = t.messages[#t.messages]
+    local w = M.waiting(t)
+    yours = yours + (w.yours and 1 or 0)
+    agent = agent + (w.rank == 1 and 1 or 0)
+    local turn = w.label .. (t.status == "outdated" and " · outdated" or "") .. (t.side == "old" and " · old side" or "")
+    local rest = string.format("%s: %s", last.author == "user" and "you" or last.author, first_line(last.body))
+    rows[#rows + 1] = { loc = string.format("%s:%d", t.file, t.range.start), turn = turn, rest = rest }
+    items[#items + 1] = {
+      filename = session.thread_path(root, t),
+      lnum = t.range.start,
+      end_lnum = t.range["end"],
+      type = w.type, -- warning / info: Trouble, fzf-lua etc. color by it
+      text = turn .. " · " .. rest, -- what other tools show
+      user_data = t.id,
+    }
+  end
+  local title = string.format("Code review · %d waiting for you · %d waiting for agent", yours, agent)
+  vim.fn.setqflist({}, " ", {
+    title = title,
+    items = items,
+    quickfixtextfunc = "v:lua.require'code-review'.qf_text",
+    context = { code_review_root = root }, -- <CR> / a click opens the thread (see open_qf_item)
+  })
+  qf_rows[vim.fn.getqflist({ id = 0 }).id] = rows -- per list, so :colder still shows older ones aligned
   if #items == 0 then
-    return notify("no threads")
+    return notify(mode == "yours" and "nothing waits for you" or "no threads")
   end
   vim.cmd.copen()
+  local win = api.nvim_get_current_win()
+  vim.wo[win].wrap = false -- one thread per line, long messages are cut at the edge
+  color_qf(win)
+end
+
+---In the quickfix window: if the item under the cursor is a thread of a thread
+---list, jump to it and open its conversation.
+---@return boolean handled false for any other list (let the caller do the default)
+function M.open_qf_item()
+  local wininfo = vim.fn.getwininfo(api.nvim_get_current_win())[1]
+  if not wininfo or wininfo.quickfix ~= 1 or wininfo.loclist == 1 then
+    return false
+  end
+  local ctx = vim.fn.getqflist({ context = 1 }).context
+  local root = type(ctx) == "table" and ctx.code_review_root
+  local item = vim.fn.getqflist()[vim.fn.line(".")]
+  if not (root and item and type(item.user_data) == "string") then
+    return false
+  end
+  local data = safe_read(root)
+  local t = data and store.find(data, item.user_data)
+  if not t then
+    notify("that thread no longer exists", vim.log.levels.WARN)
+    return true
+  end
+  vim.fn.setqflist({}, "a", { idx = vim.fn.line(".") }) -- keep :cnext going from here
+  -- the window the list belongs to: the previous one, else any normal window
+  local target = vim.fn.win_getid(vim.fn.winnr("#"))
+  if target == 0 or target == api.nvim_get_current_win() or vim.fn.win_gettype(target) ~= "" then
+    target = nil
+    for _, w in ipairs(api.nvim_tabpage_list_wins(0)) do
+      if vim.fn.win_gettype(w) == "" and vim.bo[api.nvim_win_get_buf(w)].buftype == "" then
+        target = w
+        break
+      end
+    end
+  end
+  if not target then
+    vim.cmd("aboveleft split")
+    target = api.nvim_get_current_win()
+  end
+  M.goto_thread(target, root, t)
+  return true
 end
 
 ---Jump to the next (dir = 1) or previous (dir = -1) thread in the current
@@ -1681,7 +1804,8 @@ local subcommands = {
     end
   end,
   list = function(o)
-    M.list(o.fargs[2] == "all")
+    local arg = o.fargs[2]
+    M.list(arg == "all" and "all" or arg == "yours" and "yours" or false)
   end,
   next = function()
     M.jump(1)

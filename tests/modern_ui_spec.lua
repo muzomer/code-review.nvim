@@ -344,7 +344,7 @@ describe("modern UI", function()
       waiting_thread()
       local threads = picker.thread_entries(root)
       eq(#threads, 1)
-      eq(threads[1].text, "head/lib/core.py:5: [needs you] agent: new default")
+      eq(threads[1].text, "head/lib/core.py:5: ● waiting for you  agent: new default")
     end)
 
     case("fall back to vim.ui.select and open the chosen thread in the diff", function()

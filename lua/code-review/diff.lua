@@ -1072,7 +1072,28 @@ function M.attach_quickfix(group)
           end
         end, { buffer = ev.buf, desc = "Code review: next/previous PR file" })
       end
+      local cr = require("code-review")
+      -- a thread list: jump to the thread and open it; a click does the same
+      local function default_click(keys)
+        api.nvim_feedkeys(api.nvim_replace_termcodes(keys, true, false, true), "n", false)
+      end
+      vim.keymap.set("n", "<2-LeftMouse>", function()
+        if not cr.open_qf_item() then
+          default_click("<2-LeftMouse>")
+        end
+      end, { buffer = ev.buf, desc = "Code review: open the thread" })
+      if cr.config.mouse ~= false then
+        vim.keymap.set("n", "<LeftRelease>", function()
+          local ctx = vim.fn.getqflist({ context = 1 }).context
+          if type(ctx) == "table" and ctx.code_review_root and vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist ~= 1 then
+            cr.open_qf_item()
+          end
+        end, { buffer = ev.buf, desc = "Code review: open the thread" })
+      end
       vim.keymap.set("n", "<CR>", function()
+        if cr.open_qf_item() then
+          return
+        end
         local idx = vim.fn.line(".")
         local loclist = vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist == 1
         local items = loclist and vim.fn.getloclist(0) or vim.fn.getqflist()

@@ -68,7 +68,10 @@ describe("progress", function()
   local function status_text()
     for _, w in ipairs(floats()) do
       if api.nvim_win_get_height(w) == 1 then
-        return (api.nvim_buf_get_lines(api.nvim_win_get_buf(w), 0, -1, false)[1] or "")
+        -- the agent's name is the window title, the state is the body
+        local title = api.nvim_win_get_config(w).title
+        local name = type(title) == "table" and table.concat(vim.tbl_map(function(c) return c[1] end, title)) or (title or "")
+        return name .. "|" .. (api.nvim_buf_get_lines(api.nvim_win_get_buf(w), 0, -1, false)[1] or "")
       end
     end
   end
@@ -102,6 +105,11 @@ describe("progress", function()
     waiting_thread()
     ac.poke(root)
     assert(status_text():find("Review PR", 1, true) and status_text():find("sent", 1, true), tostring(status_text()))
+    -- styled like the thread and chat windows: plain float colors, name as the title,
+    -- only the state is colored
+    eq(status_text(), " Review PR | … sent")
+    local w = floats()[1]
+    assert(not vim.wo[w].winhighlight:find("NormalFloat", 1, true), vim.wo[w].winhighlight)
     restore()
   end)
 

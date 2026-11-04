@@ -192,13 +192,21 @@ describe("PR review", function()
     return #vim.tbl_filter(function(w) return vim.wo[w].diff end, api.nvim_tabpage_list_wins(0))
   end
 
-  it("keeps <CR> working in the thread list, opening PR items as diffs", function()
+  it("<CR> in the thread list opens the diff at the thread and its conversation", function()
     ac.list(false)
     assert(vim.bo.buftype == "quickfix")
+    eq(vim.wo.wrap, false)
     api.nvim_win_set_cursor(0, { 1, 0 })
+    local tid = vim.fn.getqflist()[1].user_data
     feed("<CR>")
-    assert(api.nvim_buf_get_name(0):find("src/a.py", 1, true), api.nvim_buf_get_name(0))
     eq(diff_wins(), 2)
+    local names = vim.tbl_map(function(w) return api.nvim_buf_get_name(api.nvim_win_get_buf(w)) end,
+      vim.tbl_filter(function(w) return vim.wo[w].diff end, api.nvim_tabpage_list_wins(0)))
+    assert(names[1]:find("src/a.py", 1, true) or names[2]:find("src/a.py", 1, true), vim.inspect(names))
+    -- the thread float has focus and shows that thread
+    assert(api.nvim_win_get_config(0).relative ~= "", "thread float")
+    assert(table.concat(api.nvim_buf_get_lines(0, 0, -1, false), "\n"):find(store.find(store.read(root), tid).messages[1].body, 1, true))
+    vim.cmd("close")
     vim.cmd("cclose")
   end)
 

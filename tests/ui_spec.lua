@@ -200,11 +200,78 @@ describe("ui", function()
   end)
 
   it("lists project threads sorted, optionally with resolved ones", function()
-    ac.list()
-    eq(vim.tbl_map(function(i) return i.lnum end, vim.fn.getqflist()), { 2, 5 })
+    ac.list() -- the thread on line 5 has the agent's reply, so it waits for you and comes first
+    eq(vim.tbl_map(function(i) return i.lnum end, vim.fn.getqflist()), { 5, 2 })
     ac.list(true)
-    eq(vim.tbl_map(function(i) return i.lnum end, vim.fn.getqflist()), { 2, 5, 7 })
+    eq(vim.tbl_map(function(i) return i.lnum end, vim.fn.getqflist()), { 5, 2, 7 })
     vim.cmd("cclose")
+  end)
+end)
+
+describe("thread list: whose turn", function()
+  ac.setup({ notify = false })
+  local root = tmp_project({ ["a.lua"] = { "1", "2", "3", "4" }, ["b.lua"] = { "1", "2" } })
+  local function add(file, line, author, reply, status)
+    store.update(root, function(d)
+      local id = store.add_thread(d, {
+        file = file, start = line, ["end"] = line, anchor = { text = { tostring(line) } }, author = "user", body = "q" .. line,
+      })
+      local t = store.find(d, id)
+      if reply then
+        store.add_message(t, "agent", reply)
+      end
+      t.status = status or t.status
+    end)
+  end
+  add("a.lua", 1, "user")                   -- waiting for agent
+  add("b.lua", 2, "user", "answered")      -- waiting for you
+  add("a.lua", 3, "user", "done", "resolved")
+  add("a.lua", 4, "user", "see this")      -- waiting for you
+
+  it("puts threads waiting for you first, labels and types them", function()
+    vim.cmd.edit(root .. "/a.lua")
+    ac.list()
+    local qf = vim.fn.getqflist()
+    eq(vim.tbl_map(function(i) return { vim.fn.fnamemodify(vim.fn.bufname(i.bufnr), ":t"), i.lnum, i.type } end, qf),
+      { { "a.lua", 4, "W" }, { "b.lua", 2, "W" }, { "a.lua", 1, "I" } })
+    eq(qf[1].text, "● waiting for you · agent: see this")
+    eq(qf[3].text, "○ waiting for agent · you: q1")
+    eq(vim.fn.getqflist({ title = 1 }).title, "Code review · 2 waiting for you · 1 waiting for agent")
+    -- columns line up whatever the file names and labels are
+    local shown = api.nvim_buf_get_lines(vim.fn.getqflist({ qfbufnr = 1 }).qfbufnr, 0, -1, false)
+    eq(shown, {
+      "a.lua:4  ● waiting for you    agent: see this",
+      "b.lua:2  ● waiting for you    agent: answered",
+      "a.lua:1  ○ waiting for agent  you: q1",
+    })
+    local groups = vim.tbl_map(function(m) return m.group end, vim.fn.getmatches())
+    assert(vim.tbl_contains(groups, "CodeReviewNeedsUser") and vim.tbl_contains(groups, "CodeReviewNeedsAgent"), vim.inspect(groups))
+    vim.cmd("cclose")
+  end)
+
+  it("<CR> on a thread jumps to its line and opens the conversation", function()
+    vim.cmd.edit(root .. "/a.lua")
+    ac.list()
+    api.nvim_win_set_cursor(0, { 2, 0 }) -- b.lua:2
+    vim.cmd("normal \r")
+    assert(api.nvim_win_get_config(0).relative ~= "", "thread float has focus")
+    assert(table.concat(api.nvim_buf_get_lines(0, 0, -1, false), "\n"):find("answered", 1, true))
+    vim.cmd("close")
+    eq(vim.fn.fnamemodify(api.nvim_buf_get_name(0), ":t"), "b.lua")
+    eq(api.nvim_win_get_cursor(0)[1], 2)
+    vim.cmd("cclose")
+  end)
+
+  it("lists only what waits for you with yours, resolved last with all", function()
+    vim.cmd.edit(root .. "/a.lua")
+    ac.list("yours")
+    eq(vim.tbl_map(function(i) return i.lnum end, vim.fn.getqflist()), { 4, 2 })
+    ac.list("all")
+    local qf = vim.fn.getqflist()
+    eq(qf[#qf].lnum, 3)
+    eq(qf[#qf].text:sub(1, #"✓ resolved"), "✓ resolved")
+    vim.cmd("cclose")
+    vim.cmd("silent! %bwipeout!")
   end)
 end)
 

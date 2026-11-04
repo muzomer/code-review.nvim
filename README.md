@@ -46,7 +46,7 @@ from `:terminal` find it.
 | `<leader>cr`                  | open the thread under the cursor                   |
 | `<leader>cx`                  | resolve / reopen the thread under the cursor       |
 | `]r` / `[r` (`:CodeReview next/prev`) | next / previous thread in the buffer (wraps, takes a count) |
-| `<leader>cl` / `<leader>cL` (`:CodeReview list [all]`) | open / all (incl. resolved) threads in the project → quickfix |
+| `<leader>cl` / `<leader>cL` (`:CodeReview list [all\|yours]`) | threads → quickfix, those waiting for you first (`● waiting for you` / `○ waiting for agent`); `all` adds resolved ones, `yours` shows only yours. `<CR>` or a click on a thread jumps to it and opens its conversation |
 | `:CodeReview copy`         | copy a prompt telling the agent to check comments  |
 | `:CodeReview delete`       | delete the thread under the cursor                 |
 | `:CodeReview refresh`      | re-anchor and redraw all buffers                   |
@@ -267,7 +267,7 @@ require("code-review").setup({
   panel_width = nil,            -- panel width (default: ~35% of the screen, 40..70)
   inline_threads = false,       -- whole conversations under the code (toggle: keymaps.inline)
   inline_max_lines = 12,        -- longest inline conversation before it is cut
-  mouse = true,                 -- click a sign to open its thread, a file in the sidebar to open it
+  mouse = true,                 -- click a sign, a thread in the quickfix list or a file in the sidebar to open it
   flash_ms = 350,               -- highlight where a jump lands (0 / false: off)
   notify = true,                -- notify when the agent replies
   notify_group_ms = 1500,       -- replies within this window become one notification

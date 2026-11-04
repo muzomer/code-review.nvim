@@ -48,9 +48,12 @@ function M.thread_entries(root, all)
       if pr and pr.kind == "pr" then
         where = (t.side == "old" and "base/" or "head/") .. t.file
       end
-      local state = t.status == "resolved" and "resolved" or (t.needs == "user" and "needs you" or "needs " .. t.needs)
+      local w = require("code-review").waiting(t)
       res[#res + 1] = {
-        text = string.format("%s:%d: [%s] %s: %s", where, t.range.start, state, last.author == "user" and "you" or last.author, (last.body:match("^[^\n]*"))),
+        loc = string.format("%s:%d:", where, t.range.start),
+        turn = w.label,
+        rest = string.format("%s: %s", last.author == "user" and "you" or last.author, (last.body:match("^[^\n]*"))),
+        rank = w.rank,
         file = t.file,
         side = t.side or "new",
         line = t.range.start,
@@ -58,12 +61,27 @@ function M.thread_entries(root, all)
       }
     end
   end
-  table.sort(res, function(a, b)
+  table.sort(res, function(a, b) -- waiting for you first, like the quickfix list
+    if a.rank ~= b.rank then
+      return a.rank < b.rank
+    end
     if a.file ~= b.file then
       return a.file < b.file
     end
     return a.line < b.line
   end)
+  -- aligned columns: location, whose turn, message (fzf still reads "path:line:" first)
+  local w_loc, w_turn = 0, 0
+  for _, e in ipairs(res) do
+    w_loc = math.max(w_loc, vim.fn.strdisplaywidth(e.loc))
+    w_turn = math.max(w_turn, vim.fn.strdisplaywidth(e.turn))
+  end
+  local function pad(text, w)
+    return text .. string.rep(" ", w - vim.fn.strdisplaywidth(text))
+  end
+  for _, e in ipairs(res) do
+    e.text = pad(e.loc, w_loc) .. " " .. pad(e.turn, w_turn) .. "  " .. e.rest
+  end
   return res
 end
 

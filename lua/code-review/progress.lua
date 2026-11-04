@@ -98,10 +98,37 @@ local function use_float()
   return mode == true or (mode == "auto" and not winbar_visible())
 end
 
+local ns_status = api.nvim_create_namespace("code-review-progress")
+
+---The float shows the agent's name as its title, like the thread and chat
+---windows, so its body is the state alone: "<icon> <state> · <details>".
+---@return string body, string? title
+local function split_title(text, title)
+  if title and title ~= "" then
+    local i, j = text:find(" " .. title .. " · ", 1, true)
+    if i then
+      return text:sub(1, i) .. text:sub(j + 1), title
+    end
+  end
+  return text, nil
+end
+
+---Write the body and color only the icon and the state word (the rest stays
+---in the normal float colors, like the other windows).
+local function fill_status(text, kind)
+  local body = " " .. text
+  api.nvim_buf_set_lines(status_win.buf, 0, -1, false, { body })
+  api.nvim_buf_clear_namespace(status_win.buf, ns_status, 0, -1)
+  local stop = body:find(" · ", 1, true) or (#body + 1)
+  api.nvim_buf_set_extmark(status_win.buf, ns_status, 0, 1, { end_col = stop - 1, hl_group = HL[kind] })
+  api.nvim_buf_set_extmark(status_win.buf, ns_status, 0, stop - 1, { end_col = #body, hl_group = "Comment" })
+end
+
 ---@param kind "working"|"done"|"blocked"
 ---@param min_width? integer never go narrower than this, so the window does not jump around
+---@param title? string the agent's name
 ---@return integer width
-local function show_status(text, kind, min_width)
+local function show_status(text, kind, min_width, title)
   vim.cmd("redrawstatus!") -- winbars and statuslines render the state text themselves
   if require("code-review").config.progress == false or not use_float() then
     close(status_win)
@@ -109,8 +136,12 @@ local function show_status(text, kind, min_width)
     return min_width or 0
   end
   M.highlights()
-  local width = math.min(math.max(vim.fn.strdisplaywidth(text) + 2, min_width or 0, MIN_WIDTH), vim.o.columns - 4)
-  local cfg = { relative = "editor", width = width, height = 1, row = 0, col = vim.o.columns - width - 2 }
+  local body, name = split_title(text, title)
+  local width = math.min(math.max(vim.fn.strdisplaywidth(body) + 2, vim.fn.strdisplaywidth(name or "") + 4, min_width or 0, MIN_WIDTH), vim.o.columns - 4)
+  local cfg = {
+    relative = "editor", width = width, height = 1, row = 0, col = vim.o.columns - width - 2,
+    title = name and (" " .. name .. " ") or "", title_pos = "left",
+  }
   if not valid(status_win) then
     local buf = api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = "wipe"
@@ -119,8 +150,8 @@ local function show_status(text, kind, min_width)
   else
     api.nvim_win_set_config(status_win.win, cfg)
   end
-  api.nvim_buf_set_lines(status_win.buf, 0, -1, false, { " " .. text })
-  vim.wo[status_win.win].winhighlight = string.format("NormalFloat:%s,FloatBorder:%s", HL[kind], HL[kind])
+  status_win.title = name
+  fill_status(body, kind)
   return width
 end
 
@@ -172,7 +203,7 @@ local function present(st, text, kind)
     views_changed()
   end
   st.text, st.kind = text, kind
-  st.width = show_status(animated(text, kind), kind, st.width)
+  st.width = show_status(animated(text, kind), kind, st.width, st.title)
   if kind == "working" and text:find("^⟳") then
     if M.use_timer and not anim then
       anim = uv.new_timer()
@@ -181,7 +212,7 @@ local function present(st, text, kind)
           return stop_anim()
         end
         if valid(status_win) then
-          api.nvim_buf_set_lines(status_win.buf, 0, -1, false, { " " .. animated(state.text, state.kind) })
+          fill_status((split_title(animated(state.text, state.kind), state.title)), state.kind)
         end
         pcall(vim.cmd, "redrawstatus")
       end))
