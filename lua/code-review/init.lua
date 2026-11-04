@@ -18,8 +18,8 @@ M.config = {
     auto_poke = "<leader>cA", -- toggle: <C-s> in the comment box also pokes the agent
     output = "<leader>cP", -- show / hide the live output of the agent you poked
     resolve = "<leader>cx", -- toggle resolved
-    list = "<leader>cl", -- open threads in the project -> quickfix
-    list_all = "<leader>cL", -- including resolved
+    list = "<C-l>", -- toggle the open threads of the project (quickfix)
+    list_all = "<C-S-l>", -- toggle all threads, resolved too (Ctrl+Shift+L needs a terminal that reports it, e.g. kitty)
     next = "]r", -- next thread in buffer (takes a count)
     prev = "[r", -- previous thread in buffer
     description = "<leader>cd", -- PR review: show the PR description
@@ -53,11 +53,13 @@ M.config = {
   agent = "auto", -- who gets poked: "auto" (a herdr agent you pick, else the background agent), "herdr", "headless"
   isolate = "fork", -- keep the work out of a herdr agent's session: "fork" (a throwaway copy of it answers in the
   -- background; falls back to "subagent"), "subagent" (typed in, the agent delegates to a subagent), false (typed in as is)
-  headless = { -- the background agent: `claude -p`, one resumable conversation per review
-    cmd = "claude",
-    allowed_tools = nil, -- default: code-review CLI + Read/Grep/Glob; add "Edit" etc. to let it change local code
-    permission_mode = nil, -- e.g. "acceptEdits"
-    args = {}, -- extra arguments
+  headless = { -- the background agent: one resumable conversation per review
+    agent = "claude", -- "claude", "codex", "opencode" or "gemini"
+    cmd = nil, -- its executable (default: the agent's own: claude, codex, opencode, gemini)
+    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob; add "Edit" etc. to let it change local code
+    permission_mode = nil, -- claude: --permission-mode (e.g. "acceptEdits"); codex: --sandbox (default "workspace-write");
+    -- gemini: --approval-mode (e.g. "yolo" to let it run the CLI); opencode: "auto" = --auto
+    args = {}, -- extra arguments for every run
   },
   icons = "auto", -- file-type icons in the file list: "auto" (when nvim-web-devicons is installed), true, false
   diff_layout = "split", -- PR diff: "split" (side by side) or "unified" (one column, like GitHub)
@@ -1535,7 +1537,7 @@ function M.list(mode)
     title = title,
     items = items,
     quickfixtextfunc = "v:lua.require'code-review'.qf_text",
-    context = { code_review_root = root }, -- <CR> / a click opens the thread (see open_qf_item)
+    context = { code_review_root = root, code_review_mode = mode or false }, -- <CR> / a click opens the thread (see open_qf_item)
   })
   qf_rows[vim.fn.getqflist({ id = 0 }).id] = rows -- per list, so :colder still shows older ones aligned
   if #items == 0 then
@@ -1545,6 +1547,23 @@ function M.list(mode)
   local win = api.nvim_get_current_win()
   vim.wo[win].wrap = false -- one thread per line, long messages are cut at the edge
   color_qf(win)
+end
+
+---Close the thread list if it is open in this tab with the same `mode`, else
+---open it (replacing any other list shown there).
+function M.toggle_list(mode)
+  local qf = vim.fn.getqflist({ winid = 0, context = 1 })
+  local ctx = qf.context
+  if qf.winid ~= 0 and type(ctx) == "table" and ctx.code_review_root and ctx.code_review_mode == (mode or false) then
+    return vim.cmd.cclose()
+  end
+  M.list(mode)
+end
+
+---Is the quickfix list a thread list of this plugin?
+function M.is_thread_list()
+  local ctx = vim.fn.getqflist({ context = 1 }).context
+  return type(ctx) == "table" and ctx.code_review_root ~= nil
 end
 
 ---In the quickfix window: if the item under the cursor is a thread of a thread
@@ -2002,10 +2021,10 @@ function M.setup(opts)
     vim.keymap.set("n", km.resolve, subcommands.resolve, { desc = "Code review: resolve/reopen thread" })
   end
   if km.list then
-    vim.keymap.set("n", km.list, function() M.list(false) end, { desc = "Code review: list open threads" })
+    vim.keymap.set("n", km.list, function() M.toggle_list(false) end, { desc = "Code review: toggle the open threads list" })
   end
   if km.list_all then
-    vim.keymap.set("n", km.list_all, function() M.list(true) end, { desc = "Code review: list all threads" })
+    vim.keymap.set("n", km.list_all, function() M.toggle_list(true) end, { desc = "Code review: toggle the list of all threads" })
   end
   if km.next then
     vim.keymap.set("n", km.next, function() M.jump(1, vim.v.count1) end, { desc = "Code review: next thread" })

@@ -247,7 +247,7 @@ end
 ---on disk) and a missing `base` means the working tree. A thread on the old
 ---side of a diff carries `side = "old"` and the ref its text comes from.
 ---Replace the text of the thread's last message when it is the user's, i.e. the
----agent has not answered it yet. Marks it `edited` (agents and the hook see that).
+---agent has not answered it yet. Marks it `edited` (agents see that).
 ---@return boolean ok
 ---@return string? err why not
 function M.edit_last_user_message(t, body)

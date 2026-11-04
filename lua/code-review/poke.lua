@@ -105,7 +105,8 @@ function M.agents()
         status = a.agent_status or "?",
         cwd = (a.cwd or ""):gsub("^" .. vim.pesc(vim.env.HOME or "\0"), "~"),
         agent = a.agent,
-        session = a.agent_session and a.agent_session.value, -- herdr's guess of its Claude session
+        session = a.agent_session and a.agent_session.value, -- herdr's guess of its session
+        dir = a.cwd, -- where the pane is now (cwd above is for display)
       }
     end
   end
@@ -117,7 +118,8 @@ M.HEADLESS = "headless" -- pane_id of the background agent (claude -p) in a save
 local function headless_target(root)
   local s = require("code-review.session").load(root)
   local what = s and s.kind == "pr" and string.format(" · PR #%s", s.number) or ""
-  return { pane_id = M.HEADLESS, title = "claude (background)" .. what }
+  local headless = require("code-review.headless")
+  return { pane_id = M.HEADLESS, title = vim.fs.basename(headless.command()) .. " (background)" .. what }
 end
 
 ---Let the user choose the agent to poke and remember the choice. Besides the
@@ -185,10 +187,9 @@ end
 
 -- Sessions of herdr panes ------------------------------------------------------
 --
--- To fork the session of a pane, we need its Claude Code session id and the
--- directory it was started in. The hook records the id for its pane on every
--- prompt (exact); herdr's own guess is the fallback. Either is only used when
--- its transcript is found.
+-- To fork the session of a pane, we need its session id and the directory it
+-- was started in. herdr reports the id; for Claude Code it is only used when its
+-- transcript is found, and the directory is read from that transcript.
 
 local function claude_dir()
   local env = vim.env.CLAUDE_CONFIG_DIR
@@ -199,37 +200,6 @@ end
 ---character becomes "-".
 function M.project_dir_name(cwd)
   return (cwd:gsub("[^%w]", "-"))
-end
-
----Where the hook records the session of each pane.
-function M.sessions_file()
-  return require("code-review.session").state_base() .. "/pane-sessions.json"
-end
-
-local function read_json(path)
-  local f = io.open(path, "r")
-  if not f then
-    return nil
-  end
-  local s = f:read("a")
-  f:close()
-  local ok, data = pcall(vim.json.decode, s)
-  return ok and type(data) == "table" and data or nil
-end
-
----Record the session a pane runs (called by the hook).
-function M.record_session(pane_id, session_id, transcript)
-  local path = M.sessions_file()
-  local data = read_json(path) or {}
-  data[pane_id] = { session_id = session_id, transcript = transcript, t = os.time() }
-  vim.fn.mkdir(vim.fs.dirname(path), "p")
-  local tmp = path .. ".tmp." .. vim.uv.os_getpid()
-  local f = io.open(tmp, "w")
-  if f then
-    f:write(vim.json.encode(data), "\n")
-    f:close()
-    vim.uv.fs_rename(tmp, path)
-  end
 end
 
 ---The directory a session was started in, read from its transcript (the first
@@ -257,26 +227,22 @@ function M.session_cwd(transcript)
   return found
 end
 
----The Claude Code session to fork for a herdr agent.
----@return { id: string, cwd: string }?
+---The session to fork for a herdr agent, as herdr reports it: for Claude Code
+---only when its transcript is found (started from the directory recorded there),
+---for other agents from the pane's directory.
+---@return { id: string, cwd: string, agent: string }?
 function M.session_of(target)
-  local candidates = {}
-  local hooked = (read_json(M.sessions_file()) or {})[target.pane_id]
-  if hooked and hooked.session_id then
-    candidates[#candidates + 1] = { id = hooked.session_id, transcript = hooked.transcript }
+  local agent = target.agent or "claude"
+  if agent ~= "claude" then
+    return target.session and target.dir and { id = target.session, cwd = target.dir, agent = agent } or nil
   end
-  if target.session then
-    candidates[#candidates + 1] = { id = target.session }
+  if not target.session then
+    return nil
   end
-  for _, c in ipairs(candidates) do
-    local transcript = c.transcript
-    if not (transcript and vim.uv.fs_stat(transcript)) then
-      transcript = vim.fn.glob(claude_dir() .. "/projects/*/" .. c.id .. ".jsonl", false, true)[1]
-    end
-    local cwd = transcript and M.session_cwd(transcript)
-    if cwd then
-      return { id = c.id, cwd = cwd }
-    end
+  local transcript = vim.fn.glob(claude_dir() .. "/projects/*/" .. target.session .. ".jsonl", false, true)[1]
+  local cwd = transcript and M.session_cwd(transcript)
+  if cwd then
+    return { id = target.session, cwd = cwd, agent = "claude" }
   end
 end
 
@@ -290,10 +256,11 @@ end
 ---Without herdr (or with no agent in it) this review's background agent
 ---(`claude -p`) is used; without both the prompt is copied.
 ---
----A herdr agent is not typed into by default (config.isolate = "fork"): a
----throwaway fork of its session answers in the background, so your session
----gets none of the work in its context. When its session cannot be found, the
----prompt is typed in and asks the agent to use a subagent ("subagent").
+---A herdr agent is not typed into by default (config.isolate = "fork"): when
+---its agent can fork sessions (Claude Code, OpenCode), a throwaway fork of its
+---session answers in the background, so your session gets none of the work in
+---its context. Otherwise the prompt is typed in; agents with subagents (Claude
+---Code) are asked to use one ("subagent"), others get the plain prompt.
 ---@param opts? { pick?: boolean } pick = choose the agent again
 function M.send(root, opts)
   opts = opts or {}
@@ -329,14 +296,16 @@ function M.send(root, opts)
       local text, sent = prompt.build(root, { style = "background" })
       return background(text, sent, target)
     end
-    if isolate == "fork" and headless.available() then
+    local adapter = require("code-review.agents").get(target.agent or "claude")
+    if isolate == "fork" and adapter and adapter.fork and headless.available(target.agent or "claude") then
       local fork = M.session_of(target)
       if fork then
         local text, sent = prompt.build(root, { style = "fork" })
         return background(text, sent, { pane_id = M.HEADLESS, title = target.title .. " (fork)" }, fork)
       end
     end
-    local text, sent = prompt.build(root, { style = isolate and "subagent" or "plain" })
+    local style = isolate and adapter and adapter.subagents and "subagent" or "plain"
+    local text, sent = prompt.build(root, { style = style })
     local before = M.snapshot(target.pane_id) -- taken before submitting, so nothing is missed
     local ok, err = M.submit(target.pane_id, text)
     if ok then

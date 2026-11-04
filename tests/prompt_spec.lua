@@ -123,7 +123,6 @@ describe("poke: keeping the agent's session small", function()
     vim.notify, vim.ui.select, vim.env.HERDR_PANE_ID, vim.env.CLAUDE_CONFIG_DIR = saved.notify, saved.select, saved.own, saved.cfg
     ac.config.isolate = nil
     herdr_session = nil
-    os.remove(poke.sessions_file())
   end
   local function case(name, fn)
     it(name, function()
@@ -159,10 +158,10 @@ describe("poke: keeping the agent's session small", function()
     end
   end
 
-  case("forks the agent's session (as recorded by the hook) instead of typing into it", function()
+  case("forks the agent's session instead of typing into it", function()
     local root = project()
-    local path = transcript("11111111-2222-4333-8444-555555555555", "/work/started-here")
-    poke.record_session("w1:p1", "11111111-2222-4333-8444-555555555555", path)
+    herdr_session = "11111111-2222-4333-8444-555555555555"
+    transcript(herdr_session, "/work/started-here")
     ac.poke(root)
     eq(#typed(), 0) -- the main session gets nothing
     eq(#spawned, 1)
@@ -172,15 +171,6 @@ describe("poke: keeping the agent's session small", function()
     assert(spawned[1].args[3]:find("temporary copy", 1, true), spawned[1].args[3])
     eq(headless.session_id(root), nil) -- a fork is not the review's background session
     assert(progress.agent_title():find("Main (fork)", 1, true), tostring(progress.agent_title()))
-  end)
-
-  case("falls back to herdr's session id when its transcript exists", function()
-    local root = project()
-    herdr_session = "99999999-2222-4333-8444-555555555555"
-    transcript(herdr_session, "/work/other")
-    ac.poke(root)
-    eq(#spawned, 1)
-    eq(spawned[1].cwd, "/work/other")
   end)
 
   case("without a known session it types the prompt and asks for a subagent", function()

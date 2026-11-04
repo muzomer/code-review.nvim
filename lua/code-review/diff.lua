@@ -1077,6 +1077,11 @@ function M.attach_quickfix(group)
       local function default_click(keys)
         api.nvim_feedkeys(api.nvim_replace_termcodes(keys, true, false, true), "n", false)
       end
+      -- q closes a thread list (elsewhere it still records a macro)
+      vim.keymap.set("n", "q", function()
+        local loclist = vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist == 1
+        return (not loclist and cr.is_thread_list()) and "<Cmd>cclose<CR>" or "q"
+      end, { buffer = ev.buf, expr = true, desc = "Code review: close the thread list" })
       vim.keymap.set("n", "<2-LeftMouse>", function()
         if not cr.open_qf_item() then
           default_click("<2-LeftMouse>")
@@ -1084,8 +1089,7 @@ function M.attach_quickfix(group)
       end, { buffer = ev.buf, desc = "Code review: open the thread" })
       if cr.config.mouse ~= false then
         vim.keymap.set("n", "<LeftRelease>", function()
-          local ctx = vim.fn.getqflist({ context = 1 }).context
-          if type(ctx) == "table" and ctx.code_review_root and vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist ~= 1 then
+          if cr.is_thread_list() and vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist ~= 1 then
             cr.open_qf_item()
           end
         end, { buffer = ev.buf, desc = "Code review: open the thread" })

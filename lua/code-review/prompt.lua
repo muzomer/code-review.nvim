@@ -3,7 +3,7 @@
 -- once instead of listing and reading first.
 --
 -- What the agent was already sent is kept in <root>/.code-review/poke-seen.json
--- ({ [thread id] = signature }), like the hook does per session.
+-- ({ [thread id] = signature }).
 local store = require("code-review.store")
 local session = require("code-review.session")
 

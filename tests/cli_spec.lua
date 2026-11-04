@@ -3,7 +3,7 @@ local bin = PLUGIN_ROOT .. "/bin/code-review"
 local function run(cwd, args, stdin, env)
   local cmd = { bin }
   vim.list_extend(cmd, args)
-  env = vim.tbl_extend("force", { NVIM_CODE_REVIEW_ROOT = "", NVIM_CODE_REVIEW_HOOK = "" }, env or {})
+  env = vim.tbl_extend("force", { NVIM_CODE_REVIEW_ROOT = "" }, env or {})
   local r = vim.system(cmd, { cwd = cwd, stdin = stdin, text = true, env = env }):wait()
   return r.code, r.stdout, r.stderr
 end
@@ -59,60 +59,6 @@ describe("cli", function()
     code, _, err = run(root, { "reply", "t_nope", "x" })
     eq(code, 1)
     assert(err:find("no thread", 1, true), err)
-  end)
-
-  it("hook announces only threads that are new to the session", function()
-    local p = tmp_project({ ["f.lua"] = { "one", "two" } })
-    local function hook(session, cwd)
-      local code, out = run("/", { "hook" }, vim.json.encode({ session_id = session, cwd = cwd or p }))
-      eq(code, 0)
-      return out
-    end
-    eq(hook("s1"), "") -- no store yet
-    local store = require("code-review.store")
-    local anchor = require("code-review.anchor")
-    local id = store.update(p, function(d)
-      return store.add_thread(d, {
-        file = "f.lua", start = 2, ["end"] = 2,
-        anchor = anchor.capture({ "one", "two" }, 2, 2), author = "user", body = "why\ntwo?",
-      })
-    end)
-    local out = hook("s1")
-    assert(out:find("1 review thread", 1, true) and out:find(id .. " f.lua:2: why two?", 1, true), out)
-    eq(hook("s1"), "") -- already told
-    assert(hook("s2"):find(id, 1, true)) -- other session hears about it
-    run(p, { "reply", id, "because" })
-    eq(hook("s1"), "") -- now waiting on the user, nothing to say
-    store.update(p, function(d) store.add_message(store.find(d, id), "user", "really?") end)
-    assert(hook("s1"):find("really?", 1, true)) -- new user message
-  end)
-
-  it("hook mode comes from NVIM_CODE_REVIEW_HOOK", function()
-    local p = tmp_project({ ["f.lua"] = { "one" } })
-    local store = require("code-review.store")
-    store.update(p, function(d)
-      return store.add_thread(d, {
-        file = "f.lua", start = 1, ["end"] = 1,
-        anchor = require("code-review.anchor").capture({ "one" }, 1, 1), author = "user", body = "fix",
-      })
-    end)
-    local function hook(session, mode)
-      local _, out = run("/", { "hook" }, vim.json.encode({ session_id = session, cwd = p }), { NVIM_CODE_REVIEW_HOOK = mode })
-      return out
-    end
-    assert(hook("m", ""):find("don't act on them unasked", 1, true)) -- default
-    assert(hook("m2", "mention"):find("don't act on them unasked", 1, true))
-    local act = hook("a", "act")
-    assert(act:find("handle these threads now", 1, true) and not act:find("unasked", 1, true), act)
-    eq(hook("o", "off"), "")
-    -- "off" records nothing, so switching that session to mention still reports
-    assert(hook("o", "mention"):find("fix", 1, true))
-    assert(hook("x", "bogus"):find("unasked", 1, true)) -- unknown value -> mention
-  end)
-
-  it("hook stays silent and succeeds on garbage input or outside projects", function()
-    local code, out = run("/", { "hook" }, "not json")
-    eq({ code, out }, { 0, "" })
   end)
 
   it("prints the skill", function()

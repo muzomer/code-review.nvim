@@ -46,7 +46,7 @@ from `:terminal` find it.
 | `<leader>cr`                  | open the thread under the cursor                   |
 | `<leader>cx`                  | resolve / reopen the thread under the cursor       |
 | `]r` / `[r` (`:CodeReview next/prev`) | next / previous thread in the buffer (wraps, takes a count) |
-| `<leader>cl` / `<leader>cL` (`:CodeReview list [all\|yours]`) | threads → quickfix, those waiting for you first (`● waiting for you` / `○ waiting for agent`); `all` adds resolved ones, `yours` shows only yours. `<CR>` or a click on a thread jumps to it and opens its conversation |
+| `<C-l>` / `<C-S-l>` (`:CodeReview list [all\|yours]`) | toggle the thread list (quickfix; `q` closes it), those waiting for you first (`● waiting for you` / `○ waiting for agent`); `all` adds resolved ones, `yours` shows only yours. `<CR>` or a click on a thread jumps to it and opens its conversation |
 | `:CodeReview copy`         | copy a prompt telling the agent to check comments  |
 | `:CodeReview delete`       | delete the thread under the cursor                 |
 | `:CodeReview refresh`      | re-anchor and redraw all buffers                   |
@@ -138,8 +138,8 @@ the full URL.
 
 Agents have no checkout either, so they read the snapshots (`code-review --pr REF diff`
 prints the paths) and fetch any other file on demand (`code-review --pr REF file <path>`).
-`:CodeReview copy` copies a prompt that already contains the right `--pr REF`.
-For the Claude Code hook, start the agent with `NVIM_CODE_REVIEW_PR=acme/api#12 claude`.
+`:CodeReview copy` copies a prompt that already contains the right `--pr REF`, and
+pokes send it too.
 
 ## Usage by agents
 
@@ -155,8 +155,11 @@ code-review skill                      # instructions for the agent
 
 Give your agent the instructions once: copy `skills/nvim-code-review` to
 `~/.claude/skills/` (Claude Code), or paste the output of
-`code-review skill` into `AGENTS.md`. Then say "check my comments", or use
-`:CodeReview copy`.
+`code-review skill` into `AGENTS.md`. Then poke it (below), say "check my
+comments", or paste the prompt from `:CodeReview copy`.
+
+Agents use `--author <name>` (default `agent`). They can add threads, reply and
+resolve, but cannot post as `user`, reopen, or delete. Those actions are yours.
 
 ### Poking the agent
 
@@ -167,66 +170,45 @@ agent can answer without listing or reading first. Threads it was already sent
 are only named. It ends with "answer here with one line", because the replies
 are in the threads already. With nothing waiting on the agent, nothing is sent.
 
-Which agent:
+Any coding agent that can run shell commands works with the comments (the CLI
+and `code-review skill` are agent-neutral). Delivering a poke depends on where
+the agent runs:
 
-- **A Claude Code session running in [herdr](https://herdr.dev)**: you pick it
-  once per review and it is remembered. By default (`isolate = "fork"`) it is
-  not typed into: a throwaway fork of its session
-  (`claude -p --resume <id> --fork-session`) answers in the background. The fork
-  knows everything the session knew, and the session's context gets none of the
-  work. The session id comes from the hook (exact, see below) or from herdr,
-  and is used only when its transcript is found. Otherwise the prompt is typed
-  into the pane and asks the agent to work in a subagent (`isolate = "subagent"`),
-  so only a one-line answer lands in its context. `isolate = false` types the
-  plain prompt.
-- **The review's background agent**: `claude -p`, started without a terminal.
+- **An agent session running in [herdr](https://herdr.dev)** (Claude Code,
+  Codex, OpenCode, Gemini CLI, …): you pick it once per review and it is
+  remembered. By default (`isolate = "fork"`) an agent that can fork sessions is
+  not typed into: a throwaway fork of its session answers in the background
+  (`claude -p --resume <id> --fork-session`, `opencode run --session <id> --fork`).
+  The fork knows everything the session knew, and the session's context gets
+  none of the work. The session id comes from herdr; for Claude Code it is used
+  only when its transcript is found, and the fork starts in the directory the
+  session was started in. Otherwise the prompt is typed into the pane:
+  Claude Code is asked to work in a subagent, so only a one-line answer lands
+  in its context; other agents get the plain prompt. `isolate = false` always
+  types the plain prompt.
+- **The review's background agent**: `headless.agent` (`"claude"` by default,
+  or `"codex"`, `"opencode"`, `"gemini"`), started without a terminal.
   It is used when herdr is not there, when no agent runs in it, or when you pick
-  "claude (background)" in the list. The first poke starts a new Claude Code
-  session; later pokes `--resume` it, so the agent keeps what it learned about
-  the PR between pokes, even across Neovim restarts. The session id is in
-  `.code-review/headless.json` and runs start in the review root (Claude Code
-  files sessions by directory). A poke while it works is queued and runs when
-  it finishes. `:CodeReview chat` opens the same conversation interactively
-  (`claude --resume <id>`).
+  "… (background)" in the list. The first poke starts a new session; later
+  pokes resume it, so the agent keeps what it learned about the PR between
+  pokes, even across Neovim restarts. The session id is in
+  `.code-review/headless.json` and runs start in the review root (agents file
+  sessions by directory). A poke while it works is queued and runs when it
+  finishes. `:CodeReview chat` opens the same conversation interactively.
+
+  | Agent | Runs | Resumes | Notes |
+  | --- | --- | --- | --- |
+  | `claude` | `claude -p --output-format stream-json` | `--resume <id>` | tools: `headless.allowed_tools` |
+  | `codex` | `codex exec --json --sandbox workspace-write` | `codex exec resume <id>` | `permission_mode` sets `--sandbox` |
+  | `opencode` | `opencode run --format json` | `--session <id>` | `permission_mode = "auto"` adds `--auto` |
+  | `gemini` | `gemini -p -o stream-json` | `-r latest` (in the review root) | needs `permission_mode = "yolo"` (or a policy) to run the CLI |
+
+  Claude Code is tested against its CLI; the others follow their documentation.
 
 `<leader>cP` shows the output of a fork or of the background agent. By default
-they may only run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`);
-widen that with `headless.allowed_tools` / `headless.permission_mode`, e.g. to
-let them change code in a local review.
-
-### Telling Claude Code about new comments automatically
-
-Add a `UserPromptSubmit` hook to `~/.claude/settings.json`. Use the
-`bin/code-review` path from [Install](#install), or just `code-review hook` if
-it is on your `PATH`:
-
-```json
-"hooks": {
-  "UserPromptSubmit": [
-    { "hooks": [{ "type": "command", "command": "/path/to/code-review.nvim/bin/code-review hook", "timeout": 10 }] }
-  ]
-}
-```
-
-On each prompt (~30 ms) it lists threads waiting on the agent that are new, or
-have a new message, since it last told that session, and prints nothing
-otherwise. Per-session state lives in `.code-review/hook-seen.json`. In a herdr
-pane it also records which Claude Code session runs there, so a poke can fork
-exactly that session.
-
-What the agent does with them depends on `NVIM_CODE_REVIEW_HOOK` in the
-environment Claude Code was started with:
-
-| Value               | Behaviour                                                        |
-| ------------------- | ---------------------------------------------------------------- |
-| unset / `mention`   | mention waiting threads; act only when you ask                   |
-| `act`               | handle new threads right away: reply, change code, resolve       |
-| `off`               | say nothing                                                      |
-
-A dedicated review session: `alias claude-review='NVIM_CODE_REVIEW_HOOK=act claude'`.
-
-Agents use `--author <name>` (default `agent`). They can add threads, reply and
-resolve, but cannot post as `user`, reopen, or delete. Those actions are yours.
+Claude may only run the `code-review` CLI and read files (`Read`, `Grep`,
+`Glob`); widen that with `headless.allowed_tools` / `headless.permission_mode`,
+e.g. to let it change code in a local review.
 
 ## How it works
 
@@ -256,8 +238,8 @@ require("code-review").setup({
     open = "<leader>cr",        -- open the thread under the cursor
     edit = "<leader>ce",        -- edit your last comment, until the agent replies
     resolve = "<leader>cx",     -- resolve / reopen
-    list = "<leader>cl",        -- open threads → quickfix
-    list_all = "<leader>cL",    -- all threads, resolved too → quickfix
+    list = "<C-l>",             -- toggle open threads → quickfix (q closes it)
+    list_all = "<C-S-l>",       -- toggle all threads, resolved too (Ctrl+Shift+L: kitty, WezTerm, ...)
     next = "]r", prev = "[r",   -- next / previous thread in the buffer
     next_yours = "]u", prev_yours = "[u", -- next / previous thread waiting for you
     inline = "<leader>ci",      -- show / hide conversations under the code
@@ -290,13 +272,16 @@ require("code-review").setup({
 
   -- Sending to the agent (see "Poking the agent")
   agent = "auto",               -- "auto" (herdr agent, else background claude), "herdr", "headless"
-  isolate = "fork",             -- herdr agents: "fork" (a throwaway copy answers), "subagent", false
+  isolate = "fork",             -- herdr agents: "fork" (a throwaway copy answers, Claude / OpenCode),
+                                -- "subagent" (typed; Claude delegates), false (typed as is)
   auto_poke = false,            -- <C-s> also sends to the agent, <M-s> only saves
   open_after_send = true,       -- a new comment sent to the agent opens its thread
   headless = {                  -- the background agent
-    cmd = "claude",
-    allowed_tools = nil,        -- default { "Bash(code-review:*)", "Read", "Grep", "Glob" }
-    permission_mode = nil,      -- e.g. "acceptEdits" (with "Edit" allowed, for local reviews)
+    agent = "claude",           -- "claude", "codex", "opencode", "gemini"
+    cmd = nil,                  -- executable (default: the agent's own)
+    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" }
+    permission_mode = nil,      -- claude --permission-mode, codex --sandbox, gemini --approval-mode,
+                                -- opencode "auto" (--auto)
     args = {},                  -- extra arguments for every run
   },
   progress = true,              -- show the agent's state after a poke (working / done / waiting)

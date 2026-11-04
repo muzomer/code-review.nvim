@@ -8,7 +8,7 @@ local bin = PLUGIN_ROOT .. "/bin/code-review"
 local function run(cwd, args, stdin)
   local cmd = { bin }
   vim.list_extend(cmd, args)
-  local r = vim.system(cmd, { cwd = cwd, stdin = stdin, text = true, env = { NVIM_CODE_REVIEW_ROOT = "", NVIM_CODE_REVIEW_HOOK = "" } }):wait()
+  local r = vim.system(cmd, { cwd = cwd, stdin = stdin, text = true, env = { NVIM_CODE_REVIEW_ROOT = "" } }):wait()
   return r.code, r.stdout, r.stderr
 end
 
@@ -111,26 +111,16 @@ describe("editing a comment", function()
     eq({ t.messages[1].body, #t.messages }, { "before", 2 })
   end)
 
-  it("the hook announces an edit again, and the CLI marks it", function()
+  it("the CLI marks an edited comment", function()
     local p = tmp_project({ ["f.lua"] = { "one", "two" } })
-    local function hook(session)
-      local code, out = run("/", { "hook" }, vim.json.encode({ session_id = session, cwd = p }))
-      eq(code, 0)
-      return out
-    end
     local id = store.update(p, function(d)
       return store.add_thread(d, {
         file = "f.lua", start = 2, ["end"] = 2,
         anchor = anchor.capture({ "one", "two" }, 2, 2), author = "user", body = "why?",
       })
     end)
-    assert(hook("s1"):find(id, 1, true))
-    eq(hook("s1"), "") -- told once
     store.update(p, function(d) store.edit_last_user_message(store.find(d, id), "why is it two?") end)
-    local out = hook("s1")
-    assert(out:find(id, 1, true) and out:find("(edited) why is it two?", 1, true), out)
-    eq(hook("s1"), "") -- and only once
     local _, shown = run(p, { "show", id })
-    assert(shown:find("[edited ", 1, true), shown)
+    assert(shown:find("[edited ", 1, true) and shown:find("why is it two?", 1, true), shown)
   end)
 end)

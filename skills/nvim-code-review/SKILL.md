@@ -60,7 +60,7 @@ first.
 
 When the user reviews a GitHub PR in Neovim there is no local checkout: the
 changed files are snapshots in a cache directory. Add `--pr <PR URL | owner/repo#n>`
-to **every** command (or run with `NVIM_CODE_REVIEW_PR` set), e.g.
+to **every** command, e.g.
 `code-review --pr acme/api#12 list --needs agent`.
 
 - `code-review --pr REF diff` starts with the PR **description** (read it first: it says what

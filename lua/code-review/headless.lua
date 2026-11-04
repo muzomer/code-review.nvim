@@ -1,13 +1,15 @@
--- A review agent that needs no open terminal: `claude -p` started in the
--- background, one conversation per review.
+-- A review agent that needs no open terminal: a coding agent started in the
+-- background (`claude -p`, `codex exec`, `opencode run`, `gemini -p`; see
+-- agents.lua), one conversation per review.
 --
--- The first poke starts a new Claude Code session with an id chosen here
--- (`--session-id`) and remembers it in <root>/.code-review/headless.json; every
--- later poke resumes it (`--resume`), so the agent keeps what it learned about
--- the PR. The run always starts in <root>, because Claude Code files sessions
--- under the directory they were started in. `:CodeReview chat` opens the same
--- conversation interactively.
+-- The first poke starts a new session and remembers it in
+-- <root>/.code-review/headless.json; every later poke resumes it, so the agent
+-- keeps what it learned about the PR. Runs start in <root>, because agents file
+-- their sessions by directory. A poke can also run a throwaway fork of another
+-- session (agents that support it), which is never saved. `:CodeReview chat`
+-- opens the review's conversation interactively.
 local store = require("code-review.store")
+local agents = require("code-review.agents")
 
 local api = vim.api
 local uv = vim.uv or vim.loop
@@ -27,13 +29,21 @@ local function notify(msg, level)
   vim.notify("code-review: " .. msg, level or vim.log.levels.INFO)
 end
 
-function M.command()
-  return cfg().cmd or "claude"
+---The adapter of the background agent (config.headless.agent, default "claude").
+---@param name? string another adapter (e.g. the agent of a session to fork)
+function M.adapter(name)
+  return agents.get(name or cfg().agent or "claude") or agents.claude
 end
 
----Can a background agent be started here?
-function M.available()
-  return vim.fn.executable(M.command()) == 1
+---Its executable: config.headless.cmd for the configured agent, else the adapter's.
+function M.command(name)
+  local own = not name or name == (cfg().agent or "claude")
+  return own and cfg().cmd or M.adapter(name).cmd
+end
+
+---Can that agent (default: the configured one) be started here?
+function M.available(name)
+  return vim.fn.executable(M.command(name)) == 1
 end
 
 -- Session id -------------------------------------------------------------------
@@ -42,7 +52,8 @@ local function session_file(root)
   return (store.paths(root)) .. "/headless.json"
 end
 
----The id of this review's Claude Code session, if one was started.
+---The id of this review's background session, if one was started with the
+---configured agent.
 ---@return string?
 function M.session_id(root)
   local f = io.open(session_file(root), "r")
@@ -52,13 +63,19 @@ function M.session_id(root)
   local s = f:read("a")
   f:close()
   local ok, data = pcall(vim.json.decode, s)
-  return ok and type(data) == "table" and data.session_id or nil
+  if not (ok and type(data) == "table") then
+    return nil
+  end
+  if (data.agent or "claude") ~= (cfg().agent or "claude") then
+    return nil -- started with another agent: start anew
+  end
+  return data.session_id
 end
 
 local function save_session_id(root, id)
   store.ensure_dir(root)
   local f = assert(io.open(session_file(root), "w"))
-  f:write(vim.json.encode({ session_id = id }), "\n")
+  f:write(vim.json.encode({ session_id = id, agent = cfg().agent or "claude" }), "\n")
   f:close()
 end
 
@@ -82,34 +99,24 @@ end
 
 -- Arguments ---------------------------------------------------------------------
 
-M.DEFAULT_TOOLS = { "Bash(code-review:*)", "Read", "Grep", "Glob" }
+M.DEFAULT_TOOLS = agents.claude.DEFAULT_TOOLS
 
----Command line of a run. `resume` = id of the session to continue, else `new_id`
----starts a new one; `fork` = id of a session to copy (the copy is thrown away).
+---Command line of a run. `resume` = id of the session to continue, `new_id` =
+---id for a new one (agents that take one), `fork` = id of a session to copy.
+---@param opts { resume?: string, new_id?: string, fork?: string, agent?: string, cwd?: string }
 function M.args(root, text, opts)
-  local c = cfg()
-  local args = { M.command(), "-p", text, "--output-format", "stream-json", "--verbose" }
-  if opts.fork then
-    vim.list_extend(args, { "--resume", opts.fork, "--fork-session" })
-  elseif opts.resume then
-    vim.list_extend(args, { "--resume", opts.resume })
-  else
-    vim.list_extend(args, { "--session-id", opts.new_id })
-  end
-  local tools = c.allowed_tools or M.DEFAULT_TOOLS
-  if #tools > 0 then
-    args[#args + 1] = "--allowedTools"
-    vim.list_extend(args, tools)
-  end
-  if c.permission_mode then
-    vim.list_extend(args, { "--permission-mode", c.permission_mode })
-  end
+  local a = M.adapter(opts.agent)
+  local dirs = {}
   -- the snapshots of a PR review live in the cache, outside the session root
   local s = require("code-review.session").load(root)
   if s and s.kind == "pr" and s.cache then
-    vim.list_extend(args, { "--add-dir", s.cache })
+    dirs[1] = s.cache
   end
-  vim.list_extend(args, c.args or {})
+  local args = a.args({
+    cmd = M.command(opts.agent), prompt = text, cwd = opts.cwd or root, dirs = dirs, cfg = cfg(),
+    new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
+  })
+  vim.list_extend(args, cfg().args or {})
   return args
 end
 
@@ -120,25 +127,12 @@ local function one_line(s, max)
   return #s > max and (s:sub(1, max - 1) .. "…") or s
 end
 
----Readable lines for one stream-json event (may be none).
+---Readable lines for one Claude Code stream-json event (kept for callers and tests).
 ---@return string[] lines
 ---@return table? result the final "result" event
 function M.describe(event)
-  local out = {}
-  if event.type == "assistant" and event.message then
-    for _, c in ipairs(event.message.content or {}) do
-      if c.type == "text" and (c.text or "") ~= "" then
-        vim.list_extend(out, vim.split(vim.trim(c.text), "\n", { plain = true }))
-      elseif c.type == "tool_use" then
-        local i = c.input or {}
-        local what = i.command or i.file_path or i.pattern or i.path or i.description or ""
-        out[#out + 1] = string.format("→ %s %s", c.name or "tool", one_line(what, 120))
-      end
-    end
-  elseif event.type == "result" then
-    return out, event
-  end
-  return out
+  local r = agents.claude.parse(event) or {}
+  return r.lines or {}, r.done and event or nil
 end
 
 local function push(run, lines)
@@ -217,10 +211,11 @@ function M.busy_policy(run)
 end
 
 ---@param on_start? fun() called each time a run starts (also a queued one)
----@param fork? { id: string, cwd: string } run a throwaway copy of this session instead
+---@param fork? { id: string, cwd: string, agent?: string } run a throwaway copy of this session instead
 start = function(root, text, on_start, retried, fork)
+  local a = M.adapter(fork and fork.agent)
   local saved = not fork and M.session_id(root) or nil
-  local new_id = not fork and not saved and M.uuid() or nil
+  local new_id = not fork and not saved and a.preset_id and M.uuid() or nil
   if new_id then
     save_session_id(root, new_id) -- before the run, so a second poke resumes it
   end
@@ -235,35 +230,63 @@ start = function(root, text, on_start, retried, fork)
     fork = fork,
   }
   runs[root] = run
-  push(run, { fork and ("● fork of session " .. fork.id)
-    or string.format("● %s %s", saved and "resuming session" or "new session", saved or new_id) })
-  local args = M.args(root, text, { resume = saved, new_id = new_id, fork = fork and fork.id })
-  -- a fork must start where its session was started: Claude Code files sessions by directory
-  run.handle = M.spawn(args, fork and fork.cwd or root, function(line)
+  local first = fork and ("fork of session " .. fork.id)
+    or saved and ("resuming session " .. saved)
+    or ("new session" .. (new_id and (" " .. new_id) or ""))
+  push(run, { string.format("● %s · %s", a.name, first) })
+  local cwd = fork and fork.cwd or root -- agents file sessions by the directory they started in
+  local args = M.args(root, text, { resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent, cwd = cwd })
+  local partial -- text streamed in pieces (delta events), shown as it grows
+  local function flush()
+    partial = nil
+  end
+  run.handle = M.spawn(args, cwd, function(line)
     local ok, event = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
     if not ok or type(event) ~= "table" then
+      flush()
       return push(run, { line })
     end
-    local lines, result = M.describe(event)
-    push(run, lines)
-    if result then
-      run.result = result
+    local r = a.parse(event) or {}
+    if r.session_id and not fork and not saved and not new_id and r.session_id ~= M.session_id(root) then
+      save_session_id(root, r.session_id) -- agents that pick their own id
+    end
+    if r.append then
+      if partial then
+        run.lines[#run.lines] = run.lines[#run.lines] .. r.append
+      else
+        push(run, { r.append })
+        partial = true
+      end
+      local last = run.lines[#run.lines]
+      if last:find("\n", 1, true) then -- keep one line per row
+        run.lines[#run.lines] = nil
+        push(run, vim.split(last, "\n", { plain = true }))
+      end
+    elseif r.lines and #r.lines > 0 then
+      flush()
+      push(run, r.lines)
+    end
+    if r.error and not r.done then
+      push(run, { "⚠ " .. one_line(r.error, 200) })
+    end
+    if r.done then
+      run.result = r
     end
   end, function(code, stderr)
     if runs[root] ~= run then
       return -- replaced (restarted) meanwhile
     end
     local r = run.result
-    if code == 0 and not (r and r.is_error) then
+    if code == 0 and not (r and r.error) then
       run.status = "done"
-      push(run, { "✓ done" .. (r and r.total_cost_usd and string.format(" · $%.2f", r.total_cost_usd) or "") })
+      push(run, { "✓ done" .. (r and r.cost and string.format(" · $%.2f", r.cost) or "") })
     else
-      local err = vim.trim((r and r.result) or stderr or "")
+      local err = vim.trim((r and r.error) or stderr or "")
       if err == "" then
         err = "exit code " .. tostring(code)
       end
       -- the saved session is gone (deleted, or never written): start a new one once
-      if saved and not retried and err:lower():find("no conversation found", 1, true) then
+      if saved and not retried and a.lost_session and a.lost_session(err) then
         M.forget(root)
         return start(root, text, on_start, true)
       end
@@ -283,7 +306,7 @@ end
 
 ---Send `text` to this review's background agent, starting or resuming it.
 ---@param on_start? fun() called when a run starts (now, or later for a queued poke)
----@param opts? { fork?: { id: string, cwd: string } } run a throwaway fork of that session
+---@param opts? { fork?: { id: string, cwd: string, agent?: string } } run a throwaway fork of that session
 ---@return boolean started false when the poke was queued or ignored
 ---@return boolean accepted false when nothing will deliver it (ignored, or a chat is open)
 function M.send(root, text, on_start, opts)
@@ -337,7 +360,7 @@ function M.chat(root)
   vim.cmd("botright vsplit")
   local buf = api.nvim_create_buf(false, true)
   api.nvim_win_set_buf(0, buf)
-  local job = vim.fn.jobstart({ M.command(), "--resume", id }, {
+  local job = vim.fn.jobstart(M.adapter().chat(M.command(), id), {
     cwd = root,
     term = true,
     on_exit = function()
