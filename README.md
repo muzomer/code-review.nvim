@@ -60,6 +60,10 @@ from `:terminal` find it.
 | `<leader>c?` (`?` in the sidebar and thread window) | the keys that work where you are |
 | `<leader>cu` (`:CodeReview layout [split\|unified]`) | PR review: side-by-side or one unified column (like GitHub) |
 | `<leader>cg` / `<leader>ct` (`:CodeReview find` / `threads [all]`) | pick a PR file / a thread, with preview (fzf-lua if installed) |
+| `<leader>cR` (`:CodeReview recent`) | resume a recent PR review from its snapshots (no network) |
+| `:CodeReview reload` (`U` in the sidebar) | fetch the PR again after new commits; your last version is kept |
+| `:CodeReview since` (`S` in the sidebar) | what changed since your last review (previous head → current head) |
+| `<leader>cc` (`:CodeReview panel`) | threads in a float or in a docked conversation panel (`<C-s>` send, `<M-s>` send + poke) |
 | `<leader>cd` (`:CodeReview description`) | PR review: show the PR title and description |
 | `<leader>cv` (`:CodeReview viewed`) | PR review: mark the file viewed (or clear it) and move to the next unreviewed one |
 | `<leader>ce` (`:CodeReview edit`) | edit your last comment of the thread under the cursor, until the agent replies |
@@ -112,7 +116,19 @@ is viewed you get a summary of the review.
 Threads on the left are tied to the base commit, so they survive and show up
 only on the old text. Comments stay on your machine; nothing is posted to GitHub.
 
-Settings: `diff_layout` (`"split"` or `"unified"`), `icons` (`"auto"`: file-type
+Opening a PR does not block: a PR you reviewed before opens at once from its
+snapshots (and is checked for new commits in the background; a banner says so);
+a new one opens as soon as its file list arrives and files fill in as they land.
+In the sidebar `f` filters (unviewed / with threads / waiting for you / changed since
+your last review). Jumps flash the line they land on; replies arriving together
+are announced together; a click on a thread's sign opens it. When an agent answers
+with a ```` ```suggestion ```` block it is shown as a diff against the commented code.
+
+For lualine: `lualine_x = { require("code-review").lualine }` shows the PR, how far
+you are and what waits for you.
+
+Settings: `conversation` (`"float"` or `"panel"`), `mouse`, `flash_ms`,
+`notify_group_ms`, `diff_layout` (`"split"` or `"unified"`), `icons` (`"auto"`: file-type
 icons when nvim-web-devicons is installed), `sidebar_position` (`"left"`, `"right"`, `"bottom"` or `"top"`; move it
 while reviewing with `:CodeReview files bottom`), `sidebar_width` for left/right
 (default: a quarter of the screen, 24..42 columns), `sidebar_height` for

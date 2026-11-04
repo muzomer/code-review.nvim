@@ -38,6 +38,9 @@ first.
 - Use `inline code` for identifiers, files and commands.
 - Use fenced code blocks with a language tag for suggested code, and keep them
   to the relevant lines. Prefer making the change over pasting it.
+- To propose a replacement for exactly the commented lines (for example in a PR
+  review, where you cannot change the code), use a ```suggestion block holding
+  the new lines; the user sees it as a diff against the commented code.
 - Short bullet lists are fine. No headings, tables, HTML, or images.
 - Say what you changed and where (`utils.lua:40`), not a summary of the diff.
 

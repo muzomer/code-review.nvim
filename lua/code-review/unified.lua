@@ -46,6 +46,11 @@ function M.rows(old, new)
   return rows
 end
 
+---Does `buf` show "since your last review" (its old lines are the previous head)?
+function M.is_since(buf)
+  return data[buf] ~= nil and data[buf].since == true
+end
+
 ---Is `buf` a unified view? Returns its { root, file }.
 function M.info(buf)
   local d = data[buf]
@@ -69,10 +74,14 @@ end
 
 ---Turn a range of buffer rows into a side and a line range on it, for a new
 ---comment: a removed row comments on the old side, anything else on the new side.
----@return "old"|"new" side, integer first, integer last
+---@return ("old"|"new")? side nil: the row only exists in your last review (since view)
+---@return integer first, integer last
 function M.translate(buf, row1, row2)
   local d = data[buf]
   local r1 = d.rows[row1]
+  if d.since and r1.kind == "del" then
+    return nil -- that line is gone from the PR: there is no code to comment on
+  end
   local side = r1.kind == "del" and "old" or "new"
   local function line_on(r)
     return r and (side == "old" and r.old or r.new)
@@ -131,12 +140,14 @@ end
 
 ---Show `file` of the PR as a unified view in `win`.
 ---@return integer buf
-function M.show(root, file, win, foldtext)
-  local old = session.lines(root, file, { side = "old" }) or {}
+---@param opts? { old_lines?: string[], since?: boolean } since = previous head → current head
+function M.show(root, file, win, foldtext, opts)
+  opts = opts or {}
+  local old = opts.old_lines or session.lines(root, file, { side = "old" }) or {}
   local new = session.lines(root, file) or {}
   local rows = M.rows(old, new)
 
-  local name = "code-review://unified/" .. (root:match("[^/]+/[^/]+/[^/]+/pr%-%d+$") or root) .. "/" .. file
+  local name = "code-review://" .. (opts.since and "since/" or "unified/") .. (root:match("[^/]+/[^/]+/[^/]+/pr%-%d+$") or root) .. "/" .. file
   local existing = vim.fn.bufnr(name)
   if existing ~= -1 then
     pcall(api.nvim_buf_delete, existing, { force = true })
@@ -146,7 +157,7 @@ function M.show(root, file, win, foldtext)
   vim.bo[buf].bufhidden = "wipe"
   vim.b[buf].code_review_unified = { root = root, file = file }
   local text = {}
-  local d = { root = root, file = file, rows = rows, old = {}, new = {} }
+  local d = { root = root, file = file, rows = rows, old = {}, new = {}, since = opts.since }
   for i, r in ipairs(rows) do
     text[i] = r.text or ""
     if r.old then

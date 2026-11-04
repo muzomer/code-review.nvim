@@ -28,6 +28,8 @@ M.config = {
     prev_yours = "[u", -- previous thread waiting for you
     help = "<leader>c?", -- show the keys
     layout = "<leader>cu", -- PR review: switch between split and unified diff
+    recent = "<leader>cR", -- resume one of your recent PR reviews (no network)
+    panel = "<leader>cc", -- switch threads between the float and the conversation panel
     find_file = "<leader>cg", -- pick a file of the PR (fzf-lua with preview, else vim.ui.select)
     find_thread = "<leader>ct", -- pick a thread
     next_file = "]f", -- PR review: next changed file
@@ -37,6 +39,11 @@ M.config = {
   inline_threads = false, -- show whole conversations under the commented lines (toggle: keymaps.inline)
   inline_max_lines = 12, -- longest inline conversation before it is cut ("open the thread for more")
   notify = true, -- notify when an agent replies
+  conversation = "float", -- open threads in a "float" (default) or a docked chat "panel" with an input box
+  panel_width = nil, -- width of the conversation panel (default: ~35% of the screen, 40..70)
+  mouse = true, -- click a thread's sign to open it; click a file in the file list to open it
+  notify_group_ms = 1500, -- replies arriving within this window become one notification
+  flash_ms = 350, -- briefly highlight where a jump lands (0 / false: off)
   progress = true, -- after a poke, show the agent's state (working / done / waiting)
   progress_float = "auto", -- where: true = floating window, false = winbar/statusline only, "auto" = float only outside a PR review
   progress_output = false, -- ... and also open the live output window right away
@@ -54,6 +61,71 @@ M.config = {
 local ns = api.nvim_create_namespace("code-review")
 local ns_mirror = api.nvim_create_namespace("code-review-mirror") -- blank lines that keep diff panes aligned
 local inline_on -- runtime toggle; nil = config.inline_threads
+local ns_flash = api.nvim_create_namespace("code-review-flash")
+
+---Briefly highlight `row` (default: cursor row) of `win`, so the eye finds where
+---a jump landed.
+function M.flash(win, row)
+  local ms = M.config.flash_ms
+  if not ms or ms <= 0 then
+    return
+  end
+  win = (win and win ~= 0) and win or api.nvim_get_current_win()
+  if not api.nvim_win_is_valid(win) then
+    return
+  end
+  local buf = api.nvim_win_get_buf(win)
+  row = row or api.nvim_win_get_cursor(win)[1]
+  api.nvim_buf_clear_namespace(buf, ns_flash, 0, -1)
+  pcall(api.nvim_buf_set_extmark, buf, ns_flash, row - 1, 0, { line_hl_group = "CodeReviewFlash", priority = 300 })
+  vim.defer_fn(function()
+    if api.nvim_buf_is_valid(buf) then
+      api.nvim_buf_clear_namespace(buf, ns_flash, 0, -1)
+    end
+  end, ms)
+end
+
+-- Replies are announced together: each `code-review reply` is its own process
+-- and its own file event, so they are collected for a moment first.
+local pending_notes, note_timer = {}, nil
+
+---Announce the collected replies now (one notification).
+function M.flush_notifications()
+  if note_timer then
+    note_timer:stop()
+    if not note_timer:is_closing() then
+      note_timer:close()
+    end
+    note_timer = nil
+  end
+  if #pending_notes == 0 then
+    return
+  end
+  local notes = pending_notes
+  pending_notes = {}
+  if #notes == 1 then
+    local n = notes[1]
+    return vim.notify(string.format("code-review: %s on %s:%d: %s", n.author, n.file, n.line, n.text))
+  end
+  local authors, where = {}, {}
+  for _, n in ipairs(notes) do
+    authors[n.author] = true
+    where[#where + 1] = string.format("%s:%d", n.file:match("[^/]+$"), n.line)
+  end
+  local who = vim.tbl_keys(authors)
+  table.sort(who)
+  vim.notify(string.format("code-review: %s replied to %d threads: %s", table.concat(who, ", "), #notes, table.concat(where, ", ")))
+end
+
+local function queue_notification(n)
+  pending_notes[#pending_notes + 1] = n
+  if note_timer then
+    note_timer:stop()
+  else
+    note_timer = (vim.uv or vim.loop).new_timer()
+  end
+  note_timer:start(M.config.notify_group_ms or 1500, 0, vim.schedule_wrap(M.flush_notifications))
+end
 local group = api.nvim_create_augroup("code-review", { clear = true })
 local did_setup = false
 local marks = {} -- buf -> { [extmark id] = thread id }
@@ -345,6 +417,10 @@ function M.render(buf, reanchor)
     return
   end
   local threads = threads_for(data, rel, side)
+  if side == "both" and require("code-review.unified").is_since(buf) then
+    -- the old column is your last review, not the PR base: base-side threads do not belong
+    threads = vim.tbl_filter(function(t) return t.side ~= "old" end, threads)
+  end
   if reanchor and side ~= "both" and #threads > 0 then
     local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
     if anchor.reanchor_threads(vim.deepcopy(threads), lines) then
@@ -382,8 +458,17 @@ function M.render(buf, reanchor)
       if #t.messages > 1 then
         label = label .. string.format("  (%d)", #t.messages)
       end
-      if t.status == "outdated" then
-        label = label .. "  [outdated]"
+      -- the end-of-line label: finished and stale threads stay small
+      local chunks = { { "  " .. sign .. label, virt_hl } }
+      if t.status == "resolved" then
+        chunks = { { string.format("  %s resolved%s", sign, #t.messages > 1 and string.format(" · %d messages", #t.messages) or ""), virt_hl } }
+      elseif t.status == "outdated" then
+        local gone = vim.trim(((t.anchor or {}).text or {})[1] or "")
+        chunks = { { "  " .. sign .. " outdated · ", virt_hl } }
+        if gone ~= "" then
+          chunks[#chunks + 1] = { gone, "CodeReviewOutdated" } -- the code it was about, struck through
+        end
+        chunks[#chunks + 1] = { label, virt_hl }
       end
       local end_line = api.nvim_buf_get_lines(buf, e, e + 1, false)[1] or ""
       local inline = inline_enabled() and t.status ~= "resolved"
@@ -392,7 +477,7 @@ function M.render(buf, reanchor)
         end_col = #end_line,
         sign_text = sign,
         sign_hl_group = sign_hl,
-        virt_text = not inline and { { "  " .. sign .. label, virt_hl } } or nil,
+        virt_text = not inline and chunks or nil,
         virt_text_pos = not inline and "eol" or nil,
         invalidate = true,
         priority = 20,
@@ -410,11 +495,51 @@ function M.render(buf, reanchor)
   if snapshot and side ~= "both" then
     M.mirror(root, rel)
   end
+  if next(marks[buf]) then
+    M.map_mouse(buf)
+  end
 end
 
 ---Are conversations shown inline right now?
 function M.inline_enabled()
   return inline_enabled()
+end
+
+---Which thread a mouse click hits: only clicks in the gutter (signs/numbers) of a
+---line that has a thread count. `pos` is vim.fn.getmousepos().
+---@return string? root, string? tid
+function M.mouse_thread(pos)
+  if not pos or (pos.winid or 0) == 0 or not api.nvim_win_is_valid(pos.winid) then
+    return nil
+  end
+  local info = vim.fn.getwininfo(pos.winid)[1]
+  if not info or pos.wincol > info.textoff or (pos.line or 0) < 1 then
+    return nil -- a click in the text itself: leave it alone
+  end
+  local buf = api.nvim_win_get_buf(pos.winid)
+  local row = pos.line - 1
+  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, { row, 0 }, { row, -1 }, { details = true, overlap = true })) do
+    local tid = marks[buf] and marks[buf][m[1]]
+    if tid then
+      return (buf_info(buf)), tid
+    end
+  end
+end
+
+function M.map_mouse(buf)
+  if not M.config.mouse or vim.b[buf].code_review_mouse then
+    return
+  end
+  vim.b[buf].code_review_mouse = true
+  vim.keymap.set("n", "<LeftMouse>", function()
+    local r, tid = M.mouse_thread(vim.fn.getmousepos())
+    if tid then
+      vim.schedule(function()
+        M.open_thread(r, tid)
+      end)
+    end
+    return "<LeftMouse>" -- the click itself still happens
+  end, { buffer = buf, expr = true, desc = "Code review: click a thread sign to open it" })
 end
 
 ---Show or hide whole conversations under the code.
@@ -486,7 +611,7 @@ local function on_store_changed(root)
     now[t.id] = #t.messages
     local last = t.messages[#t.messages]
     if M.config.notify and prev and last and last.author ~= "user" and (prev[t.id] or 0) < #t.messages then
-      notify(string.format("%s on %s:%d: %s", last.author, t.file, t.range.start, first_line(last.body)))
+      queue_notification({ author = last.author, file = t.file, line = t.range.start, text = first_line(last.body) })
     end
   end
   seen[root] = now
@@ -494,6 +619,10 @@ local function on_store_changed(root)
   pcall(require("code-review.sidebar").refresh_all) -- thread counts per file
   if float and float.root == root and api.nvim_win_is_valid(float.win) then
     M.open_thread(root, float.tid, true)
+  end
+  local panel = package.loaded["code-review.panel"]
+  if panel and panel.current() == root then
+    panel.render()
   end
 end
 
@@ -592,6 +721,41 @@ local function fence_for(lines)
 end
 
 ---The thread as a markdown document (rendered with filetype=markdown).
+---Turn ```suggestion blocks (GitHub's convention: the lines that should replace
+---the commented ones) into a ```diff of the commented code against them.
+---Other code blocks, and a suggestion block left open, stay as they are.
+function M.expand_suggestions(body, anchor_lines)
+  local lines = vim.split(body, "\n", { plain = true })
+  local out, i = {}, 1
+  while i <= #lines do
+    local open = lines[i]:match("^%s*(```+)suggestion%s*$")
+    local close
+    if open then
+      for j = i + 1, #lines do
+        if lines[j]:match("^%s*" .. open .. "%s*$") then
+          close = j
+          break
+        end
+      end
+    end
+    if close then
+      out[#out + 1] = open .. "diff"
+      for _, l in ipairs(anchor_lines or {}) do
+        out[#out + 1] = "- " .. l
+      end
+      for j = i + 1, close - 1 do
+        out[#out + 1] = "+ " .. lines[j]
+      end
+      out[#out + 1] = open
+      i = close + 1
+    else
+      out[#out + 1] = lines[i]
+      i = i + 1
+    end
+  end
+  return table.concat(out, "\n")
+end
+
 function M.thread_markdown(t)
   local r = t.range
   local loc = r.start == r["end"] and tostring(r.start) or (r.start .. "-" .. r["end"])
@@ -612,7 +776,7 @@ function M.thread_markdown(t)
     end
     local who = m.author == "user" and "**you**" or ("**" .. m.author .. "** (agent)")
     vim.list_extend(lines, { "", who .. " · " .. M.reltime(m.ts) .. (m.edited and " · edited" or ""), "" })
-    local body = vim.split(m.body, "\n")
+    local body = vim.split(M.expand_suggestions(m.body, (t.anchor or {}).text), "\n")
     vim.list_extend(lines, body)
     -- Close a fence the author left open, so it can't swallow later messages.
     local open
@@ -633,8 +797,47 @@ function M.thread_markdown(t)
   return lines
 end
 
+---Color who said what in a rendered thread.
+function M.color_authors(buf, lines)
+  api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  for i, l in ipairs(lines) do
+    local who = l:match("^(%*%*you%*%*)") or l:match("^(%*%*[^*]+%*%* %(agent%))")
+    if who then
+      api.nvim_buf_set_extmark(buf, ns, i - 1, 0, {
+        end_col = #who,
+        hl_group = who == "**you**" and "CodeReviewAuthorYou" or "CodeReviewAuthorAgent",
+        priority = 200,
+      })
+    end
+  end
+end
+
+---Threads in a float or in the docked panel (config.conversation); switch.
+function M.toggle_conversation()
+  local panel = require("code-review.panel")
+  if M.config.conversation == "panel" then
+    M.config.conversation = "float"
+    local r, tid = panel.current()
+    panel.close()
+    if r then
+      M.open_thread(r, tid)
+    end
+  else
+    M.config.conversation = "panel"
+    if float and api.nvim_win_is_valid(float.win) then
+      local r, tid = float.root, float.tid
+      api.nvim_win_close(float.win, true)
+      panel.show(r, tid)
+    end
+  end
+  notify("threads open in the " .. M.config.conversation)
+end
+
 ---Open (or refresh in place) the thread float.
 function M.open_thread(root, tid, refresh)
+  if M.config.conversation == "panel" then
+    return require("code-review.panel").show(root, tid)
+  end
   local data = safe_read(root)
   local t = data and store.find(data, tid)
   if not t then
@@ -709,18 +912,7 @@ function M.open_thread(root, tid, refresh)
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
-  -- color who said what
-  api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  for i, l in ipairs(lines) do
-    local who = l:match("^(%*%*you%*%*)") or l:match("^(%*%*[^*]+%*%* %(agent%))")
-    if who then
-      api.nvim_buf_set_extmark(buf, ns, i - 1, 0, {
-        end_col = #who,
-        hl_group = who == "**you**" and "CodeReviewAuthorYou" or "CodeReviewAuthorAgent",
-        priority = 200,
-      })
-    end
-  end
+  M.color_authors(buf, lines)
   if refresh then
     api.nvim_win_set_height(win, math.min(#lines, math.floor(vim.o.lines / 2)))
   end
@@ -735,6 +927,10 @@ function M.refresh_views()
   end
   if float and api.nvim_win_is_valid(float.win) then
     M.open_thread(float.root, float.tid, true)
+  end
+  local panel = package.loaded["code-review.panel"]
+  if panel then
+    panel.render()
   end
 end
 
@@ -821,6 +1017,11 @@ local function after_write(root)
   on_store_changed(root)
 end
 
+---After a write to the store: watch it and redraw everything that shows it.
+function M.after_write(root)
+  after_write(root)
+end
+
 ---Poke the agent session that reviews (herdr) to check the comments.
 ---@param opts? { pick?: boolean } pick = choose the agent again
 -- Help ------------------------------------------------------------------------------
@@ -845,11 +1046,26 @@ local HELP_GLOBAL = {
   { "prev_file", "PR: previous unreviewed file" },
   { "viewed", "PR: mark the file viewed and move on" },
   { "layout", "PR: split / unified diff" },
+  { "recent", "resume a recent PR review" },
+  { "panel", "threads: float / docked conversation panel" },
   { "description", "PR: title and description" },
   { "help", "this help" },
 }
 
 local HELP_CONTEXT = {
+  panel = {
+    title = "Conversation panel",
+    keys = {
+      { "i / r", "write a reply (input box)" },
+      { "<C-s> / <CR>", "send (in the input box)" },
+      { "<M-s>", "send and poke the agent" },
+      { "e", "edit your last message" },
+      { "x", "resolve / reopen" },
+      { "d", "delete the thread" },
+      { "s", "poke the agent" },
+      { "q", "close the panel" },
+    },
+  },
   thread = {
     title = "Thread window",
     keys = {
@@ -869,6 +1085,9 @@ local HELP_CONTEXT = {
       { "<CR> / o", "open the file / fold a folder" },
       { "<Tab> / za", "fold a folder" },
       { "v", "mark viewed (or not) and go to the next" },
+      { "f", "filter: all / unviewed / with threads / waiting for you / changed since last review" },
+      { "U", "reload the PR (new commits)" },
+      { "S", "changes since your last review / whole PR" },
       { "]f / [f", "next / previous unreviewed file" },
       { "d", "PR description" },
       { "R", "refresh" },
@@ -902,7 +1121,11 @@ function M.help_lines(context)
     end
   end
   section("Anywhere", rows)
-  vim.list_extend(lines, { "Commands: :CodeReview pr <url> · files · poke [pick] · inline · stop", "" })
+  vim.list_extend(lines, {
+    "Commands: :CodeReview pr <url> · recent · reload · since · files [left|right|bottom|top]",
+    "          · layout [split|unified] · panel · find · threads [all] · poke [pick] · inline · stop",
+    "",
+  })
   return lines
 end
 
@@ -950,6 +1173,64 @@ function M.help(context)
   end
 end
 
+local line_cache = {} -- root -> { key, text }
+
+---Root of the review shown in `buf` (PR pane, unified view or file list), cheaply.
+local function review_root(buf)
+  local u = vim.b[buf].code_review_unified
+  if u then
+    return u.root
+  end
+  local sb = vim.b[buf].code_review_sidebar
+  if sb then
+    return sb
+  end
+  return (session.infer(api.nvim_buf_get_name(buf)))
+end
+
+---Statusline component (lualine: `lualine_x = { require("code-review").lualine }`):
+---"acme/api#12 · 12/35 viewed · 2 waiting for you", plus the agent's progress.
+---Empty outside a review. Cached: recomputed only when comments or viewed marks change.
+function M.lualine()
+  local progress = package.loaded["code-review.progress"]
+  local p = progress and progress.statusline() or ""
+  local root = review_root(api.nvim_get_current_buf())
+  if not root then
+    return p
+  end
+  local _, file = store.paths(root)
+  local st = (vim.uv or vim.loop).fs_stat(file)
+  local viewed = require("code-review.diff").viewed(root)
+  local key = st and string.format("%d.%d:%d", st.mtime.sec, st.mtime.nsec, st.size) or "none"
+  local c = line_cache[root]
+  if not (c and c.key == key and c.viewed == viewed) then
+    local s = session.load(root) or {}
+    local n_viewed, total = 0, #(s.files or {})
+    for _, f in ipairs(s.files or {}) do
+      if viewed[f.path] then
+        n_viewed = n_viewed + 1
+      end
+    end
+    local yours = 0
+    local data = safe_read(root)
+    for _, t in ipairs(data and data.threads or {}) do
+      if t.needs == "user" and t.status ~= "resolved" then
+        yours = yours + 1
+      end
+    end
+    local parts = { string.format("%s/%s#%s", s.owner or "?", s.repo or "?", s.number or "?") }
+    if total > 0 then
+      parts[#parts + 1] = string.format("%d/%d viewed", n_viewed, total)
+    end
+    if yours > 0 then
+      parts[#parts + 1] = string.format("%d waiting for you", yours)
+    end
+    c = { key = key, viewed = viewed, text = table.concat(parts, " · ") }
+    line_cache[root] = c
+  end
+  return p ~= "" and (c.text .. " · " .. p) or c.text
+end
+
 ---Progress text of the agent being followed, for a statusline ("" when none).
 function M.status()
   return require("code-review.progress").statusline()
@@ -988,6 +1269,9 @@ function M.add(line1, line2)
   end
   if side == "both" then -- unified view: rows → the side and lines they show
     side, line1, line2 = require("code-review.unified").translate(buf, line1, line2)
+    if not side then
+      return notify("this line only existed in your last review; comment on the current code", vim.log.levels.WARN)
+    end
   end
   -- the anchor is taken from the text of that side (a unified buffer mixes both)
   local lines = vim.b[buf].code_review_unified and (session.lines(root, rel, { side = side }) or {})
@@ -1190,6 +1474,7 @@ function M.jump(dir, count)
   vim.cmd("normal! m'") -- add to jumplist
   api.nvim_win_set_cursor(0, { target + 1, 0 })
   vim.cmd("normal! ^")
+  M.flash()
 end
 
 M.prompt = [[I left review comments on the code for you. Run `code-review list --needs agent` to see them (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> "..."`, make any changes requested, and only resolve a thread with `code-review resolve <id>` once the change is done.]]
@@ -1265,6 +1550,7 @@ function M.jump_yours(dir)
   else
     vim.cmd.edit(vim.fn.fnameescape(root .. "/" .. target.file))
     pcall(api.nvim_win_set_cursor, 0, { target.range.start, 0 })
+    M.flash()
   end
   M.open_thread(root, target.id)
 end
@@ -1287,6 +1573,22 @@ local subcommands = {
   end,
   help = function()
     M.help()
+  end,
+  reload = function()
+    local diff = require("code-review.diff")
+    local root = diff.where() or current_root()
+    diff.reload(root)
+  end,
+  since = function()
+    local diff = require("code-review.diff")
+    local root = diff.where() or current_root()
+    diff.toggle_since(root)
+  end,
+  recent = function()
+    require("code-review.diff").recent()
+  end,
+  panel = function()
+    M.toggle_conversation()
   end,
   layout = function(o)
     local diff = require("code-review.diff")
@@ -1409,6 +1711,8 @@ local function highlights()
   set("CodeReviewAgent", "DiagnosticHint")
   set("CodeReviewVirt", "Comment")
   set("CodeReviewDim", "NonText")
+  set("CodeReviewFlash", "IncSearch")
+  api.nvim_set_hl(0, "CodeReviewOutdated", { strikethrough = true, link = nil, default = true, fg = (api.nvim_get_hl(0, { name = "Comment", link = false }) or {}).fg })
   set("CodeReviewAuthorYou", "DiagnosticInfo") -- the same colors everywhere: thread window, inline, summary
   set("CodeReviewAuthorAgent", "DiagnosticHint")
   require("code-review.diff").highlights()
@@ -1431,6 +1735,25 @@ function M.setup(opts)
     callback = function(ev)
       M.sync_from_marks(ev.buf)
       M.render(ev.buf)
+    end,
+  })
+  -- Has the PR got new commits? Checked now and then (throttled) while reviewing.
+  api.nvim_create_autocmd({ "FocusGained", "BufEnter" }, {
+    group = group,
+    callback = function(ev)
+      local r = review_root(ev.buf)
+      if r then
+        require("code-review.diff").check_updates(r)
+      end
+    end,
+  })
+  -- The winbar shows the function around the cursor: keep it current in review panes.
+  api.nvim_create_autocmd("CursorMoved", {
+    group = group,
+    callback = function(ev)
+      if vim.b[ev.buf].code_review_unified or session.infer(api.nvim_buf_get_name(ev.buf)) then
+        vim.cmd("redrawstatus")
+      end
     end,
   })
   -- A diff pane keeps its window-local winbar when another file is opened in it.
@@ -1471,6 +1794,12 @@ function M.setup(opts)
   end
   if km.open then
     vim.keymap.set("n", km.open, subcommands.open, { desc = "Code review: open thread" })
+  end
+  if km.panel then
+    vim.keymap.set("n", km.panel, function() M.toggle_conversation() end, { desc = "Code review: threads in float / panel" })
+  end
+  if km.recent then
+    vim.keymap.set("n", km.recent, function() subcommands.recent() end, { desc = "Code review: recent reviews" })
   end
   if km.layout then
     vim.keymap.set("n", km.layout, function() subcommands.layout() end, { desc = "Code review: split / unified diff" })

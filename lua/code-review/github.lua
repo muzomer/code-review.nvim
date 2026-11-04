@@ -303,26 +303,25 @@ end
 ---demand with `M.ensure_file`.
 ---@return string? root
 ---@return string? err
-function M.open_pr(ref)
-  local pr, err = M.get(ref.host, string.format("/repos/%s/%s/pulls/%d", ref.owner, ref.repo, ref.number))
-  if not pr then
-    return nil, err
-  end
-  local files, ferr = M.pr_files(ref)
-  if not files then
-    return nil, ferr
-  end
-
-  local root, cache = session.dirs(ref)
-  local base_sha, head_sha = pr.base.sha, pr.head.sha
-  vim.fn.mkdir(root, "p")
-  -- Snapshots are keyed by path, not commit: drop them when the PR moved.
+---Keep the snapshots of the previous head when the PR moved: head/ becomes
+---prev-head/ (for "changed since your last review"); base/ is dropped.
+---@return table? previous { head_sha, base_sha, commits } of the earlier generation
+local function new_generation(root, cache, base_sha, head_sha)
   local prev = session.load(root)
-  if prev and (prev.base_sha ~= base_sha or prev.head_sha ~= head_sha) then
-    vim.fn.delete(cache, "rf")
+  if not (prev and prev.head_sha and (prev.base_sha ~= base_sha or prev.head_sha ~= head_sha)) then
+    return prev and prev.previous or nil
   end
-  vim.fn.mkdir(cache, "p")
+  local prev_dir = cache .. "/prev-head"
+  vim.fn.delete(prev_dir, "rf")
+  if vim.uv.fs_stat(cache .. "/head") then
+    vim.uv.fs_rename(cache .. "/head", prev_dir)
+  end
+  vim.fn.delete(cache .. "/base", "rf")
+  return { head_sha = prev.head_sha, base_sha = prev.base_sha, commits = prev.commits }
+end
 
+---The changed-file entries and the snapshot downloads still missing.
+local function plan(ref, files, cache, base_sha, head_sha)
   local changed, jobs = {}, {}
   for _, f in ipairs(files) do
     changed[#changed + 1] = {
@@ -340,6 +339,52 @@ function M.open_pr(ref)
       jobs[#jobs + 1] = { side = "head", dest = f.filename, path = contents_path(ref, f.filename, head_sha), raw = true }
     end
   end
+  return changed, jobs
+end
+
+local function record(ref, pr, changed, cache, previous)
+  return {
+    kind = "pr",
+    host = ref.host,
+    owner = ref.owner,
+    repo = ref.repo,
+    number = ref.number,
+    title = pr.title,
+    body = (pr.body or ""):gsub("\r\n", "\n"),
+    author = pr.user and pr.user.login or nil,
+    state = pr.merged and "merged" or pr.state,
+    draft = pr.draft or nil,
+    labels = vim.tbl_map(function(l) return l.name end, pr.labels or {}),
+    url = pr.html_url,
+    base_ref = pr.base.ref,
+    head_ref = pr.head.ref,
+    base_sha = pr.base.sha,
+    head_sha = pr.head.sha,
+    commits = pr.commits,
+    previous = previous,
+    cache = cache,
+    files = changed,
+  }
+end
+
+---Fetch a PR into its session directory and return the session root (blocking;
+---used by the CLI). The review UI uses M.open_pr_async.
+---@return string? root
+---@return string? err
+function M.open_pr(ref)
+  local pr, err = M.get(ref.host, string.format("/repos/%s/%s/pulls/%d", ref.owner, ref.repo, ref.number))
+  if not pr then
+    return nil, err
+  end
+  local files, ferr = M.pr_files(ref)
+  if not files then
+    return nil, ferr
+  end
+  local root, cache = session.dirs(ref)
+  vim.fn.mkdir(root, "p")
+  local previous = new_generation(root, cache, pr.base.sha, pr.head.sha)
+  vim.fn.mkdir(cache, "p")
+  local changed, jobs = plan(ref, files, cache, pr.base.sha, pr.head.sha)
   if #jobs > 0 then
     local results = M.get_many(ref.host, jobs)
     local failed
@@ -355,29 +400,135 @@ function M.open_pr(ref)
       return nil, "could not fetch every file: " .. failed
     end
   end
-
-  session.save(root, {
-    kind = "pr",
-    host = ref.host,
-    owner = ref.owner,
-    repo = ref.repo,
-    number = ref.number,
-    title = pr.title,
-    body = (pr.body or ""):gsub("\r\n", "\n"),
-    author = pr.user and pr.user.login or nil,
-    state = pr.merged and "merged" or pr.state,
-    draft = pr.draft or nil,
-    labels = vim.tbl_map(function(l) return l.name end, pr.labels or {}),
-    url = pr.html_url,
-    base_ref = pr.base.ref,
-    head_ref = pr.head.ref,
-    base_sha = base_sha,
-    head_sha = head_sha,
-    cache = cache,
-    files = changed,
-  })
+  session.save(root, record(ref, pr, changed, cache, previous))
   store.ensure_dir(root)
   return root
+end
+
+-- Non-blocking --------------------------------------------------------------------
+
+---Run a command without blocking; `cb(result)` on the main loop. When `M.run` is
+---replaced (tests) it runs through it right away.
+function M.run_async(args, cb)
+  if M.run ~= default_run then
+    return cb(M.run(args))
+  end
+  vim.system(args, { text = true }, function(res)
+    vim.schedule(function()
+      cb(res)
+    end)
+  end)
+end
+
+---GET without blocking, with the same retries as M.get. cb(body, err)
+function M.get_async(host, path, opts, cb)
+  opts = opts or {}
+  local token = M.token()
+  if not token then
+    return cb(nil, NO_TOKEN)
+  end
+  local args = request_args(token, host, path, opts)
+  local attempt = 0
+  local function try()
+    attempt = attempt + 1
+    M.run_async(args, function(res)
+      if transient(res) and attempt <= M.retries then
+        return vim.defer_fn(try, M.retry_delay_ms * attempt)
+      end
+      cb(interpret(res, path, opts))
+    end)
+  end
+  try()
+end
+
+local function files_async(ref, cb)
+  local all, page = {}, 1
+  local function next_page()
+    M.get_async(ref.host, string.format("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", ref.owner, ref.repo, ref.number, page), nil, function(data, err)
+      if not data then
+        return cb(nil, err)
+      end
+      vim.list_extend(all, data)
+      if #data < 100 or page >= 30 then
+        return cb(all)
+      end
+      page = page + 1
+      next_page()
+    end)
+  end
+  next_page()
+end
+
+---Fetch a PR without blocking Neovim.
+---  hooks.on_meta(root)            the file list is known (session saved): the UI can open
+---  hooks.on_file(path, side)      a snapshot arrived
+---  hooks.on_progress(done, total)
+---  hooks.on_done(root?, err?, failed)  failed = { [path] = err } for files that could not be read
+function M.open_pr_async(ref, hooks)
+  hooks = hooks or {}
+  local function call(name, ...)
+    if hooks[name] then
+      local ok, e = pcall(hooks[name], ...)
+      if not ok then
+        vim.notify("code-review: " .. tostring(e), vim.log.levels.ERROR)
+      end
+    end
+  end
+  M.get_async(ref.host, string.format("/repos/%s/%s/pulls/%d", ref.owner, ref.repo, ref.number), nil, function(pr, err)
+    if not pr then
+      return call("on_done", nil, err, {})
+    end
+    files_async(ref, function(files, ferr)
+      if not files then
+        return call("on_done", nil, ferr, {})
+      end
+      local root, cache = session.dirs(ref)
+      vim.fn.mkdir(root, "p")
+      local previous = new_generation(root, cache, pr.base.sha, pr.head.sha)
+      vim.fn.mkdir(cache, "p")
+      local changed, jobs = plan(ref, files, cache, pr.base.sha, pr.head.sha)
+      session.save(root, record(ref, pr, changed, cache, previous)) -- early: the review can open now
+      store.ensure_dir(root)
+      call("on_meta", root)
+      local failed, done, next_i, active = {}, 0, 1, 0
+      if #jobs == 0 then
+        return call("on_done", root, nil, failed)
+      end
+      local function launch()
+        while active < M.concurrency and next_i <= #jobs do
+          local job = jobs[next_i]
+          next_i = next_i + 1
+          active = active + 1
+          M.get_async(ref.host, job.path, { raw = true }, function(body, jerr)
+            active = active - 1
+            done = done + 1
+            if body then
+              write_snapshot(cache, job.side, job.dest, body)
+              call("on_file", job.dest, job.side == "base" and "old" or "new")
+            elseif jerr and not jerr:find("^not found") then
+              failed[job.dest] = jerr
+            end
+            call("on_progress", done, #jobs)
+            if done == #jobs then
+              return call("on_done", root, nil, failed)
+            end
+            launch()
+          end)
+        end
+      end
+      launch()
+    end)
+  end)
+end
+
+---Ask GitHub (without blocking) whether the PR moved. cb({ head_sha, base_sha, commits }?, err?)
+function M.check_update(s, cb)
+  M.get_async(s.host or "github.com", string.format("/repos/%s/%s/pulls/%d", s.owner, s.repo, s.number), nil, function(pr, err)
+    if not pr then
+      return cb(nil, err)
+    end
+    cb({ head_sha = pr.head.sha, base_sha = pr.base.sha, commits = pr.commits })
+  end)
 end
 
 ---Make sure `path` exists in the head (or base) snapshot, fetching it from

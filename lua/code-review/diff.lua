@@ -20,8 +20,55 @@ local cache = {} -- root -> { s = session, viewed = { [path] = bool } }
 ---Reload the cached state of a review.
 function M.refresh_cache(root)
   local s = session.load(root)
-  cache[root] = s and { s = s, viewed = session.viewed_map(root) } or nil
+  cache[root] = s and { s = s, viewed = session.viewed_map(root), since = M.compute_since(root, s) } or nil
   return cache[root]
+end
+
+---Files that changed since the previous version of the review (the PR got new
+---commits): { [path] = true }, or nil when there is no previous version.
+function M.compute_since(root, s)
+  if not (s and s.previous) then
+    return nil
+  end
+  local res = {}
+  for _, f in ipairs(s.files or {}) do
+    local prev = session.snapshot_path_in(s.cache, f.path, "prev")
+    local head = session.snapshot_path_in(s.cache, f.path, "new")
+    local a = vim.uv.fs_stat(prev) and vim.fn.readfile(prev) or nil
+    local b = vim.uv.fs_stat(head) and vim.fn.readfile(head) or nil
+    if not vim.deep_equal(a, b) then
+      res[f.path] = true
+    end
+  end
+  return res
+end
+
+---What changed since the previous version, or nil (see compute_since).
+function M.since(root)
+  local c = cache[root] or M.refresh_cache(root)
+  return c and c.since
+end
+
+local since_mode = {} -- root -> true: show "since your last review" instead of the PR diff
+
+---Show what changed since your last review (previous head → current head), or
+---go back to the normal diff.
+function M.toggle_since(root)
+  local s = session.load(root)
+  if not (s and s.previous) then
+    return vim.notify("code-review: nothing to compare yet: this review has no earlier version (it appears after the PR gets new commits and you reload)")
+  end
+  since_mode[root] = not since_mode[root] or nil
+  local _, file = M.where()
+  if file then
+    M.show_file(root, file)
+  end
+  vim.notify("code-review: " .. (since_mode[root] and "showing changes since your last review" or "showing the whole PR diff"))
+end
+
+---Is "since your last review" on?
+function M.since_mode(root)
+  return since_mode[root] == true
 end
 
 local function cached(root)
@@ -150,6 +197,7 @@ function M.highlights()
   link("CodeReviewWinbarNew", "DiagnosticOk")
   link("CodeReviewWinbarDim", "Comment")
   link("CodeReviewFold", "Comment") -- "⋯ 42 unchanged lines"
+  link("CodeReviewWinbarCtx", "Function") -- the function around the cursor
   -- the current file in the PR file list
   set("CodeReviewQfCurrent", { bg = tint(bg, hl_color("DiagnosticInfo", "fg", 0x2f81f7), 0.30, fg), bold = true })
   set("CodeReviewDiffFiller", { fg = blend(bg, hl_color("NonText", "fg", dark and 0x6e7681 or 0x8c959f), 0.6), bg = blend(bg, dark and 0xffffff or 0x000000, 0.04) })
@@ -202,6 +250,43 @@ function M.files(root, open, current)
 end
 
 local WINBAR = "%{%v:lua.require'code-review.diff'.winbar()%}"
+
+local ctx_cache = {} -- win -> { buf, row, text }
+
+---Where the cursor of `win` is in the code: the enclosing functions / classes,
+---outermost first ("Parser › parse"), from treesitter. "" without a parser.
+function M.context(win)
+  local buf = api.nvim_win_get_buf(win)
+  local row = api.nvim_win_get_cursor(win)[1]
+  local c = ctx_cache[win]
+  if c and c.buf == buf and c.row == row then
+    return c.text
+  end
+  local text = ""
+  pcall(function()
+    local parser = vim.treesitter.get_parser(buf, nil, { error = false })
+    if not parser then
+      return
+    end
+    parser:parse()
+    local line = api.nvim_buf_get_lines(buf, row - 1, row, false)[1] or ""
+    local node = vim.treesitter.get_node({ bufnr = buf, pos = { row - 1, #(line:match("^%s*") or "") }, ignore_injections = true })
+    local names = {}
+    while node do
+      local t = node:type()
+      if t:find("function") or t:find("method") or t:find("class") or t:find("struct") or t:find("impl") then
+        local name = node:field("name")[1]
+        if name then
+          table.insert(names, 1, (vim.treesitter.get_node_text(name, buf):gsub("%s+", " ")))
+        end
+      end
+      node = node:parent()
+    end
+    text = table.concat(names, " › ")
+  end)
+  ctx_cache[win] = { buf = buf, row = row, text = text }
+  return text
+end
 local FOLDTEXT = "v:lua.require'code-review.diff'.foldtext()"
 
 ---Text of a closed fold in a diff pane (unchanged code), as highlight chunks.
@@ -233,8 +318,12 @@ function M.winbar()
     return (tostring(x or "?"):gsub("%%", "%%%%"))
   end
   if side == "both" then
+    local since = require("code-review.unified").is_since(wbuf)
     local parts = {
-      string.format(
+      since and string.format(
+        " %%#CodeReviewWinbarNew#SINCE YOUR LAST REVIEW%%* %%<%%#CodeReviewWinbarDim#@%s%%* → %s %%#CodeReviewWinbarDim#@%s%%*",
+        esc(((s.previous or {}).head_sha or ""):sub(1, 7)), esc(s.head_ref), esc((s.head_sha or ""):sub(1, 7))
+      ) or string.format(
         " %%#CodeReviewWinbarNew#UNIFIED%%* %%<%s %%#CodeReviewWinbarDim#@%s%%* → %s %%#CodeReviewWinbarDim#@%s%%*",
         esc(s.base_ref), esc((s.base_sha or ""):sub(1, 7)), esc(s.head_ref), esc((s.head_sha or ""):sub(1, 7))
       ),
@@ -245,6 +334,10 @@ function M.winbar()
     if c.viewed[file] then
       parts[#parts + 1] = "%#CodeReviewQfCheck#✓ viewed%*"
     end
+    local where = M.context(win)
+    if where ~= "" then
+      parts[#parts + 1] = "%#CodeReviewWinbarCtx#" .. esc(where) .. "%*"
+    end
     local bar = table.concat(parts, " · ")
     local p = require("code-review").config.progress ~= false and require("code-review.progress").current()
     if p then
@@ -254,7 +347,9 @@ function M.winbar()
   end
   if side == "old" then
     -- %< : on a narrow pane cut the details, never the side label
+    local where = M.context(win)
     return string.format(" %%#CodeReviewWinbarOld#OLD%%* %%<%s %%#CodeReviewWinbarDim#@%s%%*", esc(s.base_ref), esc((s.base_sha or ""):sub(1, 7)))
+      .. (where ~= "" and (" · %#CodeReviewWinbarCtx#" .. esc(where) .. "%*") or "")
   end
   local parts = {
     string.format(" %%#CodeReviewWinbarNew#NEW%%* %%<%s %%#CodeReviewWinbarDim#@%s%%*", esc(s.head_ref), esc((s.head_sha or ""):sub(1, 7))),
@@ -264,6 +359,10 @@ function M.winbar()
   end
   if c.viewed[file] then
     parts[#parts + 1] = "%#CodeReviewQfCheck#✓ viewed%*"
+  end
+  local where = M.context(win)
+  if where ~= "" then
+    parts[#parts + 1] = "%#CodeReviewWinbarCtx#" .. esc(where) .. "%*"
   end
   local bar = table.concat(parts, " · ")
   -- the agent's progress after a poke, right-aligned
@@ -275,6 +374,21 @@ function M.winbar()
 end
 
 local sidebar_hidden = {} -- root -> true after the user closed the sidebar
+local loading = {} -- root -> true while the PR is being downloaded
+local waiting = {} -- root -> file shown as "loading…", to show for real when it lands
+local shown = {} -- root -> the file on screen
+local updates = {} -- root -> { commits = n } when GitHub has newer commits than the review
+local last_check = {} -- root -> time of the last update check
+
+---Is the PR of `root` still being downloaded?
+function M.loading(root)
+  return loading[root] == true
+end
+
+---Newer commits on GitHub than in the review, or nil.
+function M.update_available(root)
+  return updates[root]
+end
 
 ---Go to the review tab and leave exactly one window for the diff, next to the
 ---sidebar. The sidebar and any quickfix list stay (no :only, no :cclose).
@@ -289,7 +403,8 @@ local function review_tab()
   local keep
   for _, w in ipairs(api.nvim_tabpage_list_wins(0)) do
     local b = api.nvim_win_get_buf(w)
-    if api.nvim_win_get_config(w).relative == "" and not sidebar.is_sidebar(w) and vim.bo[b].buftype ~= "quickfix" then
+    if api.nvim_win_get_config(w).relative == "" and not sidebar.is_sidebar(w) and vim.bo[b].buftype ~= "quickfix"
+      and not vim.b[b].code_review_panel then -- the conversation panel stays too
       if not keep then
         keep = w
       else
@@ -344,6 +459,9 @@ function M.show_file(root, file, side, line)
     return notify("no such file in this PR: " .. tostring(file), vim.log.levels.WARN)
   end
   require("code-review").setup_once()
+  if since_mode[root] then
+    return M.show_unified(root, file, side, line, true)
+  end
   if M.layout() == "unified" then
     return M.show_unified(root, file, side, line)
   end
@@ -356,7 +474,15 @@ function M.show_file(root, file, side, line)
   has_head = has_head and vim.uv.fs_stat(head) ~= nil
 
   review_tab()
-  if has_base and has_head then
+  if not has_base and not has_head and M.loading(root) then
+    -- not downloaded yet: a placeholder that is replaced when the file arrives
+    local buf = api.nvim_create_buf(false, true)
+    vim.bo[buf].bufhidden = "wipe"
+    api.nvim_buf_set_lines(buf, 0, -1, false, { "", "  ⋯ loading " .. file .. " …" })
+    vim.bo[buf].modifiable = false
+    api.nvim_win_set_buf(0, buf)
+    waiting[root] = file
+  elseif has_base and has_head then
     vim.cmd.edit(esc(head))
     vim.cmd("diffthis")
     local new_win = api.nvim_get_current_win()
@@ -384,10 +510,15 @@ function M.show_file(root, file, side, line)
       vim.wo[w].fillchars = (vim.wo[w].fillchars ~= "" and (vim.wo[w].fillchars .. ",") or "") .. "fold: "
     end
   end
+  shown[root] = file
   local win = api.nvim_get_current_win()
   if not sidebar_hidden[root] then
     sidebar.open(root)
     vim.cmd("wincmd =") -- the sidebar keeps its width (winfixwidth); the panes share the rest
+  end
+  local panel = package.loaded["code-review.panel"]
+  if panel then
+    panel.restore_size() -- equalizing can squeeze the conversation panel
   end
   sidebar.render(root, file)
   api.nvim_set_current_win(win)
@@ -395,28 +526,41 @@ function M.show_file(root, file, side, line)
     local n = api.nvim_buf_line_count(0)
     pcall(api.nvim_win_set_cursor, 0, { math.max(1, math.min(line, n)), 0 })
     vim.cmd("normal! zz")
+    require("code-review").flash()
   end
 end
 
 ---Show `file` as one unified column (see code-review.unified).
-function M.show_unified(root, file, side, line)
+function M.show_unified(root, file, side, line, since)
   local unified = require("code-review.unified")
+  shown[root] = file
   review_tab()
   M.refresh_cache(root)
   M.highlights()
   local win = api.nvim_get_current_win()
-  local buf = unified.show(root, file, win, FOLDTEXT)
+  local opts
+  if since then
+    local s = session.load(root)
+    local prev = session.snapshot_path_in(s.cache, file, "prev")
+    opts = { since = true, old_lines = vim.uv.fs_stat(prev) and vim.fn.readfile(prev) or {} }
+  end
+  local buf = unified.show(root, file, win, FOLDTEXT, opts)
   vim.wo[win].winbar = WINBAR
   require("code-review").render(buf)
   if not sidebar_hidden[root] then
     sidebar.open(root)
   end
   sidebar.render(root, file)
+  local panel = package.loaded["code-review.panel"]
+  if panel then
+    panel.restore_size()
+  end
   api.nvim_set_current_win(win)
   local row = line and unified.row_of(buf, side or "new", line)
   if row then
     pcall(api.nvim_win_set_cursor, win, { row, 0 })
     vim.cmd("normal! zvzz")
+    require("code-review").flash(win, row)
   else
     api.nvim_win_set_cursor(win, { 1, 0 })
     unified.next_change(1)
@@ -708,35 +852,205 @@ function M.show_progress(name, done, total)
   pcall(vim.cmd.redraw)
 end
 
----Fetch a PR (URL or owner/repo#n) and start reviewing it.
+---Reopen a review from its local snapshots, without the network, at the first
+---file not viewed yet.
+function M.resume(root)
+  require("code-review").setup_once()
+  local s = session.load(root)
+  if not s or s.kind ~= "pr" then
+    return notify("no such review", vim.log.levels.WARN)
+  end
+  M.refresh_cache(root)
+  local order = sidebar.ordered(s)
+  if #order == 0 then
+    return M.files(root)
+  end
+  local viewed = M.viewed(root)
+  local target = order[1]
+  for _, f in ipairs(order) do
+    if not viewed[f.path] then
+      target = f
+      break
+    end
+  end
+  M.show_file(root, target.path)
+  return root
+end
+
+---One line about a review for the "recent reviews" list.
+function M.review_line(r)
+  local s, root = r.session, r.root
+  local viewed, n_viewed = session.viewed_map(root), 0
+  for _, f in ipairs(s.files or {}) do
+    if viewed[f.path] then
+      n_viewed = n_viewed + 1
+    end
+  end
+  local ok, data = pcall(require("code-review.store").read, root)
+  local yours = 0
+  for _, t in ipairs(ok and data.threads or {}) do
+    if t.needs == "user" and t.status ~= "resolved" then
+      yours = yours + 1
+    end
+  end
+  local ago = r.last > 0 and require("code-review").reltime(os.date("!%Y-%m-%dT%H:%M:%SZ", r.last)) or ""
+  local parts = { label(s), s.title or "", string.format("%d/%d viewed", n_viewed, #(s.files or {})) }
+  if yours > 0 then
+    parts[#parts + 1] = string.format("%d waiting for you", yours)
+  end
+  if ago ~= "" then
+    parts[#parts + 1] = ago
+  end
+  return table.concat(parts, " · ")
+end
+
+---Pick one of the reviews on this machine and resume it.
+function M.recent()
+  local list = session.reviews()
+  if #list == 0 then
+    return notify("no reviews yet: open one with :CodeReview pr <url>")
+  end
+  vim.ui.select(list, { prompt = "Recent reviews", format_item = M.review_line }, function(r)
+    if r then
+      M.resume(r.root)
+    end
+  end)
+end
+
+---Fetch a PR (URL or owner/repo#n) and start reviewing it, without blocking:
+---a PR reviewed before opens at once from its snapshots (and is checked for new
+---commits in the background); a new one opens as soon as its file list is known
+---and the files fill in as they arrive.
 function M.open(refstr)
   require("code-review").setup_once()
   local ref, err = github.parse_ref(refstr)
   if not ref then
     return notify(err, vim.log.levels.ERROR)
   end
-  local name = string.format("%s/%s#%d", ref.owner, ref.repo, ref.number)
-  M.show_progress(name, nil, nil)
-  github.on_progress = function(done, total)
-    M.show_progress(name, done, total)
+  local root = session.dirs(ref)
+  local cached = session.load(root)
+  if cached and cached.kind == "pr" and cached.head_sha and M.complete(root) then
+    M.resume(root)
+    M.check_updates(root, true)
+    return root
   end
-  local ok_open, root, ferr = pcall(github.open_pr, ref)
-  github.on_progress = nil
-  if not ok_open then
-    root, ferr = nil, root
-  end
-  if not root then
-    return notify(ferr, vim.log.levels.ERROR)
-  end
+  return M.fetch(root, ref)
+end
+
+---Are all snapshots of the review on disk (it can open without the network)?
+function M.complete(root)
   local s = session.load(root)
-  local help = (require("code-review").config.keymaps or {}).help or "? in the sidebar"
-  notify(string.format("%s: %d changed files. <CR> in the sidebar opens a diff; ]f / [f step through files; %s lists all keys.", label(s), #s.files, help))
-  if #s.files > 0 then
-    M.show_file(root, s.files[1].path)
-  else
-    M.files(root)
+  for _, f in ipairs(s and s.files or {}) do
+    if f.status ~= "added" and not vim.uv.fs_stat(session.snapshot_path(root, f.path, "old")) then
+      return false
+    end
+    if f.status ~= "removed" and not vim.uv.fs_stat(session.snapshot_path(root, f.path, "new")) then
+      return false
+    end
   end
+  return s ~= nil
+end
+
+---Download (or re-download) the PR of `root` in the background and keep the
+---review on screen up to date.
+function M.fetch(root, ref)
+  if loading[root] then
+    notify("already downloading this PR")
+    return root
+  end
+  local name = string.format("%s/%s#%d", ref.owner, ref.repo, ref.number)
+  local had = session.load(root)
+  local was_shown = had and shown[root]
+  loading[root] = true
+  M.show_progress(name, nil, nil)
+  github.open_pr_async(ref, {
+    on_meta = function(r)
+      M.refresh_cache(r)
+      if not had then
+        local s = session.load(r)
+        local first = sidebar.ordered(s)[1]
+        if first then
+          M.show_file(r, first.path)
+        else
+          M.files(r)
+        end
+      else
+        sidebar.render(r)
+      end
+    end,
+    on_file = function(path)
+      sidebar.render(root)
+      -- the file on screen (or its "loading…" placeholder) gets the side that arrived
+      if waiting[root] == path or (not had and shown[root] == path) then
+        waiting[root] = nil
+        local win = api.nvim_get_current_win()
+        M.show_file(root, path)
+        if api.nvim_win_is_valid(win) and sidebar.is_sidebar(win) then
+          api.nvim_set_current_win(win)
+        end
+      end
+    end,
+    on_progress = function(done, total)
+      M.show_progress(name, done, total)
+    end,
+    on_done = function(r, ferr, failed)
+      loading[root] = nil
+      if not r then
+        return notify(ferr or "could not open the PR", vim.log.levels.ERROR)
+      end
+      updates[r] = nil
+      M.refresh_cache(r)
+      sidebar.render(r)
+      local s = session.load(r)
+      local bad = vim.tbl_keys(failed or {})
+      if #bad > 0 then
+        table.sort(bad)
+        notify(string.format("%d file(s) could not be downloaded: %s", #bad, table.concat(bad, ", ")), vim.log.levels.WARN)
+      end
+      local help = (require("code-review").config.keymaps or {}).help or "? in the sidebar"
+      local since = s.previous and " · changes since your last review: :CodeReview since" or ""
+      notify(string.format("%s: %d changed files. <CR> in the sidebar opens a diff; ]f / [f step through files; %s lists all keys%s.", name, #s.files, help, since))
+      if had and was_shown then
+        M.show_file(r, was_shown) -- the same file, now at the new commit
+      end
+    end,
+  })
   return root
+end
+
+---Fetch the PR again (new commits), keeping the previous version for "since".
+function M.reload(root)
+  local s = session.load(root)
+  if not s or s.kind ~= "pr" then
+    return notify("not in a PR review", vim.log.levels.WARN)
+  end
+  return M.fetch(root, { host = s.host or "github.com", owner = s.owner, repo = s.repo, number = s.number })
+end
+
+M.check_every = 180 -- seconds between background update checks
+
+---Ask GitHub, in the background, whether the PR got new commits; if so show a
+---banner (sidebar + notification). Throttled; `force` skips the throttle.
+function M.check_updates(root, force)
+  local s = session.load(root)
+  if not s or s.kind ~= "pr" or loading[root] then
+    return
+  end
+  local now = os.time()
+  if not force and last_check[root] and now - last_check[root] < M.check_every then
+    return
+  end
+  last_check[root] = now
+  github.check_update(s, function(info)
+    if not info or (info.head_sha == s.head_sha and info.base_sha == s.base_sha) then
+      return
+    end
+    local new = (info.commits and s.commits) and math.max(0, info.commits - s.commits) or nil
+    updates[root] = { commits = new }
+    sidebar.render(root)
+    local key = "U in the sidebar or :CodeReview reload"
+    notify(string.format("this PR was updated%s · %s", new and string.format(" (%d new commit%s)", new, new == 1 and "" or "s") or "", key), vim.log.levels.WARN)
+  end)
 end
 
 ---<CR> in a quickfix list opens PR items as diffs and behaves as usual for

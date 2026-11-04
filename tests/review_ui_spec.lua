@@ -240,7 +240,7 @@ describe("review UI", function()
       routes["/pulls/21/files"][#routes["/pulls/21/files"] + 1] =
         { filename = "src/app/a_really_long_module_name_that_never_fits.py", status = "added", additions = 7, deletions = 0 }
       routes["contents/src/app/a_really_long_module_name_that_never_fits.py?ref=HEAD2121bbbb"] = "x\n"
-      diff.open("acme/ui#21")
+      diff.reload(root) -- the PR's file list changed: fetch again
       local win = sidebar.find_win()
       local width = api.nvim_win_get_width(win)
       for _, l in ipairs(lines()) do
@@ -251,7 +251,7 @@ describe("review UI", function()
       local _, long = row_index("a_really")
       assert(long:find("…", 1, true) and long:find("+7", 1, true), long) -- shortened, counts still visible
       table.remove(routes["/pulls/21/files"])
-      diff.open("acme/ui#21")
+      diff.reload(root)
     end)
 
     case("colors rows with extmarks, not window matches", function()

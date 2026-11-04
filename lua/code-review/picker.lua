@@ -75,6 +75,7 @@ function M.open(root, e)
   else
     vim.cmd.edit(vim.fn.fnameescape(root .. "/" .. e.file))
     pcall(api.nvim_win_set_cursor, 0, { e.line or 1, 0 })
+    require("code-review").flash()
   end
   if e.tid then
     require("code-review").open_thread(root, e.tid)

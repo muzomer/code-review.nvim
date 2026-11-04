@@ -50,6 +50,33 @@ local ns = api.nvim_create_namespace("code-review-sidebar")
 local rows = {} -- buf -> { [row] = { kind = "file", path = ... } | { kind = "dir", dir = ... } }
 local collapsed = {} -- root -> { [dir] = true }
 local current = {} -- root -> path shown in the diff
+local filters = {} -- root -> one of M.FILTERS (nil = "all")
+
+M.FILTERS = { "all", "unviewed", "threads", "yours", "since" }
+local FILTER_LABEL = { unviewed = "unviewed", threads = "with threads", yours = "waiting for you", since = "changed since your last review" }
+
+---The filter of the file list of `root`.
+function M.filter(root)
+  return filters[root] or "all"
+end
+
+---Show only some files: "all", "unviewed", "threads" (open threads) or "yours"
+---(threads waiting for you). Without `mode`, go to the next one.
+function M.set_filter(root, mode)
+  if not mode then
+    local cur = M.filter(root)
+    for i, m in ipairs(M.FILTERS) do
+      if m == cur then
+        mode = M.FILTERS[i % #M.FILTERS + 1]
+      end
+    end
+    if mode == "since" and not require("code-review.diff").since(root) then
+      mode = "all" -- no earlier version to compare with
+    end
+  end
+  filters[root] = mode ~= "all" and mode or nil
+  M.render(root)
+end
 
 local STATUS = {
   added = { "A", "CodeReviewStatusAdded" },
@@ -150,6 +177,13 @@ local function map_keys(buf)
   vim.keymap.set("n", "za", function() M.toggle_dir() end, o("fold folder"))
   vim.keymap.set("n", "v", function() M.toggle_viewed_row() end, o("toggle viewed"))
   vim.keymap.set("n", "R", function() M.refresh_all() end, o("refresh"))
+  if require("code-review").config.mouse ~= false then
+    -- the click moves the cursor to the row; act on release
+    vim.keymap.set("n", "<LeftRelease>", function() M.activate() end, o("open the clicked file / fold the folder"))
+  end
+  vim.keymap.set("n", "f", function() M.set_filter(vim.b[buf].code_review_sidebar) end, o("filter: all / unviewed / with threads / waiting for you"))
+  vim.keymap.set("n", "U", function() diff().reload(vim.b[buf].code_review_sidebar) end, o("reload the PR (new commits)"))
+  vim.keymap.set("n", "S", function() diff().toggle_since(vim.b[buf].code_review_sidebar) end, o("changes since your last review"))
   vim.keymap.set("n", "q", function() M.close() end, o("close"))
   local km = require("code-review").config.keymaps or {}
   vim.keymap.set("n", km.next_file or "]f", function() diff().step(1) end, o("next unreviewed file"))
@@ -250,15 +284,31 @@ function M.render(root, shown)
   if not s then
     return
   end
-  local files = M.ordered(s)
+  local all_files = M.ordered(s)
   local viewed = require("code-review.diff").viewed(root)
   local counts = thread_counts(root)
   local n_viewed = 0
-  for _, f in ipairs(files) do
+  for _, f in ipairs(all_files) do
     if viewed[f.path] then
       n_viewed = n_viewed + 1
     end
   end
+  local mode = M.filter(root)
+  local files = vim.tbl_filter(function(f)
+    local c = counts[f.path]
+    if mode == "unviewed" then
+      return not viewed[f.path]
+    elseif mode == "threads" then
+      return c ~= nil
+    elseif mode == "yours" then
+      return c ~= nil and c.yours > 0
+    elseif mode == "since" then
+      return (require("code-review.diff").since(root) or {})[f.path] == true
+    end
+    return true
+  end, all_files)
+  local diffmod = require("code-review.diff")
+  local is_loading = diffmod.loading(root)
 
   -- widths so the counts line up
   local w_name, w_add, w_del = 0, 1, 1
@@ -306,10 +356,24 @@ function M.render(root, shown)
     return text .. string.rep(" ", math.max(0, w - vim.fn.strdisplaywidth(text)))
   end
 
-  add({
+  local header = {
     { " " .. string.format("%s/%s#%d", s.owner, s.repo, s.number), "Title" },
-    { string.format(" · %d/%d viewed", n_viewed, #files), "Comment" },
-  })
+    { string.format(" · %d/%d viewed", n_viewed, #all_files), "Comment" },
+  }
+  if mode ~= "all" then
+    header[#header + 1] = { string.format(" · %s: %d", FILTER_LABEL[mode], #files), "WarningMsg" }
+  end
+  add(header)
+  local upd = diffmod.update_available(root)
+  if upd then
+    add({ { string.format(" ⟳ PR updated%s · U to reload", upd.commits and string.format(" · %d new commit%s", upd.commits, upd.commits == 1 and "" or "s") or ""), "WarningMsg" } })
+  elseif diffmod.since(root) and next(diffmod.since(root)) then
+    local n = vim.tbl_count(diffmod.since(root))
+    add({ { string.format(" ↻ %d file%s changed since your last review · S", n, n == 1 and "" or "s"), "Comment" } })
+  end
+  if #files == 0 then
+    add({ { "   no files match (f: next filter)", "Comment" } })
+  end
   local groups, order = tree(files)
   local fold = collapsed[root] or {}
   for _, dir in ipairs(order) do
@@ -325,7 +389,7 @@ function M.render(root, shown)
         local pieces = {
           { dir ~= "" and "  " or "", nil },
           { current[root] == f.path and "▶" or " ", "CodeReviewQfMarker" },
-          { is_viewed and "✓" or " ", "CodeReviewQfCheck" },
+          { is_viewed and "✓" or (is_loading and not (vim.uv.fs_stat(session.snapshot_path(root, f.path, f.status == "removed" and "old" or "new"))) and "…" or " "), "CodeReviewQfCheck" },
           { " " .. st[1] .. " ", st[2] },
         }
         if use_icons then

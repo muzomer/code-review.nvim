@@ -46,9 +46,36 @@ function M.infer(path)
   return root, file, dir == "base" and "old" or "new"
 end
 
----Snapshot path inside a known cache directory.
+---Snapshot path inside a known cache directory. side "prev" = the head of the
+---previous generation (kept when the PR got new commits).
 function M.snapshot_path_in(cache, file, side)
-  return string.format("%s/%s/%s", cache, side == "old" and "base" or "head", file)
+  local dir = side == "old" and "base" or side == "prev" and "prev-head" or "head"
+  return string.format("%s/%s/%s", cache, dir, file)
+end
+
+---Every PR review on this machine: { root, session, last (seconds: last activity) },
+---most recent first.
+function M.reviews()
+  local res = {}
+  local base = M.state_base()
+  for _, path in ipairs(vim.fn.glob(base .. "/*/*/*/pr-*/" .. store.DIR .. "/" .. M.FILE, false, true)) do
+    local root = vim.fs.dirname(vim.fs.dirname(path))
+    local s = M.load(root)
+    if s and s.kind == "pr" then
+      local last = 0
+      for _, f in ipairs({ path, (select(2, store.paths(root))), store.paths(root) .. "/viewed.json" }) do
+        local st = vim.uv.fs_stat(f)
+        if st and st.mtime.sec > last then
+          last = st.mtime.sec
+        end
+      end
+      res[#res + 1] = { root = root, session = s, last = last }
+    end
+  end
+  table.sort(res, function(a, b)
+    return a.last > b.last
+  end)
+  return res
 end
 
 ---Absolute path to read a thread's file from (snapshot in PR sessions).
