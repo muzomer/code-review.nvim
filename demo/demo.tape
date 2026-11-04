@@ -13,7 +13,7 @@ Set Framerate 25
 Set PlaybackSpeed 1.0
 
 Hide
-Type "cd /tmp/api && clear && nvim --clean -u \"$DEMO_DIR/init.lua\" rate_limiter.py"
+Type `cd /tmp/api && clear && nvim --clean -u "$DEMO_DIR/init.lua" rate_limiter.py`
 Enter
 Sleep 1.5s
 Show
