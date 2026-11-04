@@ -749,7 +749,8 @@ function M.summary_text(root)
   end
   if yours > 0 then
     local km = require("code-review").config.keymaps or {}
-    text = text .. string.format(". %s jumps to the ones waiting for you.", km.next_yours or "]u")
+    local key = require("code-review.keys").label(km.next_yours)
+    text = text .. (key and string.format(". %s jumps to the ones waiting for you.", key) or ".")
   end
   return text
 end
@@ -1007,7 +1008,7 @@ function M.fetch(root, ref)
         table.sort(bad)
         notify(string.format("%d file(s) could not be downloaded: %s", #bad, table.concat(bad, ", ")), vim.log.levels.WARN)
       end
-      local help = (require("code-review").config.keymaps or {}).help or "? in the sidebar"
+      local help = require("code-review.keys").label((require("code-review").config.keymaps or {}).help) or "? in the sidebar"
       local since = s.previous and " · changes since your last review: :CodeReview since" or ""
       notify(string.format("%s: %d changed files. <CR> in the sidebar opens a diff; ]f / [f step through files; %s lists all keys%s.", name, #s.files, help, since))
       if had and was_shown then
@@ -1053,8 +1054,28 @@ function M.check_updates(root, force)
   end)
 end
 
----<CR> in a quickfix list opens PR items as diffs and behaves as usual for
----everything else. Decided at keypress time, so it is right for any list.
+-- Keys of the thread list: act on the thread under the cursor.
+-- Bindings (keymaps.thread) of the thread list: the thread under the cursor, or
+-- the list itself (`list`).
+M.QF_ACTIONS = {
+  reply = { function(root, tid) require("code-review").reply(root, tid) end, "reply" },
+  edit = { function(root, tid) require("code-review").edit(root, tid) end, "edit your last message" },
+  resolve = { function(root, tid) require("code-review").toggle_resolved(root, tid) end, "resolve / reopen" },
+  delete = { function(root, tid) require("code-review").delete(root, tid) end, "delete the thread" },
+  send = { function(root) require("code-review").poke(root) end, "send to the agent" },
+  help = { function() require("code-review").help("list") end, "keys", list = true },
+  close = { function() vim.cmd.cclose() end, "close the thread list", list = true },
+}
+
+---Run a binding of the thread list (see QF_ACTIONS).
+function M.qf_action(name)
+  local a = M.QF_ACTIONS[name]
+  local root, tid = require("code-review").qf_thread()
+  if root or (a.list and require("code-review").is_thread_list()) then
+    a[1](root, tid)
+  end
+end
+
 function M.attach_quickfix(group)
   api.nvim_create_autocmd("FileType", {
     group = group,
@@ -1063,7 +1084,11 @@ function M.attach_quickfix(group)
       -- ]f / [f are Neovim's built-in "gf" here, which fails on the first word of
       -- a row (E447). On a PR item (e.g. the thread list of a review) they step files.
       local km = require("code-review").config.keymaps or {}
-      for lhs, dir in pairs({ [km.next_file or "]f"] = 1, [km.prev_file or "[f"] = -1 }) do
+      local keys = require("code-review.keys")
+      local steps = {}
+      for _, lhs in ipairs(keys.list(km.next_file)) do steps[lhs] = 1 end
+      for _, lhs in ipairs(keys.list(km.prev_file)) do steps[lhs] = -1 end
+      for lhs, dir in pairs(steps) do
         vim.keymap.set("n", lhs, function()
           if M.where() then
             M.step(dir)
@@ -1077,11 +1102,18 @@ function M.attach_quickfix(group)
       local function default_click(keys)
         api.nvim_feedkeys(api.nvim_replace_termcodes(keys, true, false, true), "n", false)
       end
-      -- q closes a thread list (elsewhere it still records a macro)
-      vim.keymap.set("n", "q", function()
-        local loclist = vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist == 1
-        return (not loclist and cr.is_thread_list()) and "<Cmd>cclose<CR>" or "q"
-      end, { buffer = ev.buf, expr = true, desc = "Code review: close the thread list" })
+      -- the keys of the thread window act on the thread under the cursor (q closes the list)
+      local tk = keys.group("thread")
+      for name, a in pairs(M.QF_ACTIONS) do
+        for _, key in ipairs(keys.list(tk[name])) do
+          -- expr: in any other list the key keeps its built-in meaning (search, macros, ...)
+          vim.keymap.set("n", key, function()
+            local loclist = vim.fn.getwininfo(api.nvim_get_current_win())[1].loclist == 1
+            local ours = not loclist and (a.list and cr.is_thread_list() or cr.qf_thread() ~= nil)
+            return ours and string.format("<Cmd>lua require('code-review.diff').qf_action(%q)<CR>", name) or key
+          end, { buffer = ev.buf, expr = true, desc = "Code review: " .. a[2] })
+        end
+      end
       vim.keymap.set("n", "<2-LeftMouse>", function()
         if not cr.open_qf_item() then
           default_click("<2-LeftMouse>")

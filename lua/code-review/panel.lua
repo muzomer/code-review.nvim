@@ -50,16 +50,20 @@ local function scratch(name, filetype)
   return buf
 end
 
+local keys = require("code-review.keys")
+
 local function input_bar()
-  local km = state and state.edit and "edit your last message" or "reply"
+  local what = state and state.edit and "edit your last message" or "reply"
+  local ik = keys.group("input")
+  local send, alt = keys.label(ik.submit) or "-", keys.label(ik.submit_alt) or "-"
   if cr().config.auto_poke then
-    return string.format(" %s · <C-s> send + poke the agent · <M-s> send only ", km)
+    return string.format(" %s · %s send + poke the agent · %s send only ", what, send, alt)
   end
-  return string.format(" %s · <C-s> send · <M-s> send + poke the agent ", km)
+  return string.format(" %s · %s send · %s send + poke the agent ", what, send, alt)
 end
 
 local function map(buf, modes, lhs, fn, desc)
-  vim.keymap.set(modes, lhs, fn, { buffer = buf, nowait = true, desc = "Code review panel: " .. desc })
+  keys.set(modes, lhs, fn, { buffer = buf, nowait = true, desc = "Code review panel: " .. desc })
 end
 
 local function create()
@@ -77,18 +81,18 @@ local function create()
   state = state or {}
   state.conv, state.input = { buf = conv, win = cwin }, { buf = input, win = iwin }
 
-  map(conv, "n", "q", M.close, "close")
-  map(conv, "n", "i", M.focus_input, "write a reply")
-  map(conv, "n", "r", M.focus_input, "write a reply")
-  map(conv, "n", "e", M.edit_last, "edit your last message")
-  map(conv, "n", "x", function() cr().toggle_resolved(state.root, state.tid) end, "resolve / reopen")
-  map(conv, "n", "d", function() cr().delete(state.root, state.tid) end, "delete the thread")
-  map(conv, "n", "s", function() cr().poke(state.root) end, "poke the agent")
-  map(conv, "n", "?", function() cr().help("panel") end, "keys")
-  map(input, { "n", "i" }, "<C-s>", function() M.send(false) end, "send")
-  map(input, "n", "<CR>", function() M.send(false) end, "send")
-  map(input, { "n", "i" }, "<M-s>", function() M.send(true) end, "send and poke the agent")
-  map(input, "n", "q", M.close, "close")
+  local tk, ik = keys.group("thread"), keys.group("input")
+  map(conv, "n", tk.close, M.close, "close")
+  map(conv, "n", tk.reply, M.focus_input, "write a reply")
+  map(conv, "n", tk.edit, M.edit_last, "edit your last message")
+  map(conv, "n", tk.resolve, function() cr().toggle_resolved(state.root, state.tid) end, "resolve / reopen")
+  map(conv, "n", tk.delete, function() cr().delete(state.root, state.tid) end, "delete the thread")
+  map(conv, "n", tk.send, function() cr().poke(state.root) end, "poke the agent")
+  map(conv, "n", tk.help, function() cr().help("panel") end, "keys")
+  map(input, { "n", "i" }, ik.submit, function() M.send(false) end, "send")
+  map(input, "n", ik.submit_normal, function() M.send(false) end, "send")
+  map(input, { "n", "i" }, ik.submit_alt, function() M.send(true) end, "send and poke the agent")
+  map(input, "n", ik.cancel, M.close, "close")
 end
 
 ---Show thread `tid` of `root` in the panel (opening it when needed). The focus

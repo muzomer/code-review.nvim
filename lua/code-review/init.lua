@@ -7,9 +7,12 @@ local session = require("code-review.session")
 local uv = vim.uv or vim.loop
 local api = vim.api
 
+local keys = require("code-review.keys")
+
 local M = {}
 
 M.config = {
+  -- Every binding is a key, a list of keys ({ "<C-l>", "<leader>cl" }), or false for none.
   keymaps = {
     add = "<leader>ca", -- normal: current line, visual: selection
     open = "<leader>cr", -- open thread under cursor (reply from there)
@@ -18,8 +21,8 @@ M.config = {
     auto_poke = "<leader>cA", -- toggle: <C-s> in the comment box also pokes the agent
     output = "<leader>cP", -- show / hide the live output of the agent you poked
     resolve = "<leader>cx", -- toggle resolved
-    list = "<C-l>", -- toggle the open threads of the project (quickfix)
-    list_all = "<C-S-l>", -- toggle all threads, resolved too (Ctrl+Shift+L needs a terminal that reports it, e.g. kitty)
+    list = { "<C-l>", "<leader>cl" }, -- toggle the open threads of the project (quickfix)
+    list_all = { "<C-S-l>", "<leader>cL" }, -- toggle all threads, resolved too (Ctrl+Shift+L needs a terminal that reports it, e.g. kitty)
     next = "]r", -- next thread in buffer (takes a count)
     prev = "[r", -- previous thread in buffer
     description = "<leader>cd", -- PR review: show the PR description
@@ -35,6 +38,39 @@ M.config = {
     find_thread = "<leader>ct", -- pick a thread
     next_file = "]f", -- PR review: next changed file
     prev_file = "[f", -- PR review: previous changed file
+    -- on a thread: in the thread window, the thread list (quickfix) and the conversation panel
+    thread = {
+      reply = { "r", "i" },
+      edit = "e", -- your last message, until the agent answers
+      send = "s", -- poke the agent
+      resolve = "x", -- resolve / reopen
+      delete = "d",
+      next = "n", -- next / previous thread in the file (also keymaps.next / prev)
+      prev = "p",
+      next_file = "N", -- next / previous thread across files
+      prev_file = "P",
+      help = { "?", "g?" },
+      close = { "q", "<Esc>" },
+    },
+    -- the comment box and the panel's input
+    input = {
+      submit = "<C-s>", -- normal and insert mode: save (and send, with auto_poke)
+      submit_alt = "<M-s>", -- the other one: save and send (only save, with auto_poke)
+      submit_normal = "<CR>", -- normal mode: same as submit
+      cancel = "q", -- normal mode; <Esc> only closes an empty box
+    },
+    sidebar = {
+      open = { "<CR>", "o" }, -- open the file / fold the folder
+      fold = { "<Tab>", "za" },
+      viewed = "v",
+      filter = "f",
+      reload = "U", -- the PR got new commits
+      since = "S", -- changes since your last review / the whole PR
+      description = "d",
+      refresh = "R",
+      help = { "?", "g?" },
+      close = "q",
+    },
   },
   show_resolved = false,
   inline_threads = false, -- show whole conversations under the commented lines (toggle: keymaps.inline)
@@ -417,7 +453,7 @@ function M.render(buf, reanchor)
       local km = M.config.keymaps or {}
       local function map(lhs, dir, desc)
         if lhs then
-          vim.keymap.set("n", lhs, function() require("code-review.diff").step(dir) end, { buffer = buf, desc = desc })
+          keys.set("n", lhs, function() require("code-review.diff").step(dir) end, { buffer = buf, desc = desc })
         end
       end
       map(km.next_file, 1, "Code review: next PR file")
@@ -629,6 +665,7 @@ local function on_store_changed(root)
   end
   seen[root] = now
   render_root(root)
+  M.refresh_qf(root, data)
   pcall(require("code-review.sidebar").refresh_all) -- thread counts per file
   if float and float.root == root and api.nvim_win_is_valid(float.win) then
     M.open_thread(root, float.tid, true)
@@ -669,6 +706,18 @@ end
 
 ---@param on_submit fun(text: string, poke: boolean) poke = sent with <M-s>: also poke the agent
 ---@param initial? string text to start from (editing)
+---Footer of the comment box: its keys, as configured.
+function M.input_footer()
+  local ik = keys.group("input")
+  local save = table.concat(vim.list_extend(vim.deepcopy(keys.list(ik.submit)), keys.list(ik.submit_normal)), " / ")
+  local alt = keys.label(ik.submit_alt) or "-"
+  local cancel = keys.label(ik.cancel)
+  if M.config.auto_poke then
+    return string.format(" %s save + send to agent · %s save only%s ", save, alt, cancel and (" · " .. cancel .. " cancel") or "")
+  end
+  return string.format(" %s save · %s save + send to agent%s ", save, alt, cancel and (" · " .. cancel .. " cancel") or "")
+end
+
 local function input(title, on_submit, initial)
   local buf = api.nvim_create_buf(false, true)
   vim.bo[buf].filetype = "markdown"
@@ -681,6 +730,7 @@ local function input(title, on_submit, initial)
   -- Right under the commented line, so the code stays visible; above it when
   -- there is no room below.
   local below = vim.fn.winline() + height + 2 <= api.nvim_win_get_height(0)
+  local origin = api.nvim_get_current_win() -- focus goes back there (e.g. the thread list)
   local win = api.nvim_open_win(buf, true, {
     relative = "cursor",
     width = width,
@@ -689,8 +739,7 @@ local function input(title, on_submit, initial)
     col = 0,
     border = "rounded",
     title = " " .. title .. " ",
-    footer = M.config.auto_poke and " <C-s> / <CR> save + send to agent · <M-s> save only · q cancel "
-      or " <C-s> / <CR> save · <M-s> save + send to agent · q cancel ",
+    footer = M.input_footer(),
     footer_pos = "right",
   })
   if initial then
@@ -701,6 +750,9 @@ local function input(title, on_submit, initial)
   local function close()
     if api.nvim_win_is_valid(win) then
       api.nvim_win_close(win, true)
+    end
+    if api.nvim_win_is_valid(origin) then
+      api.nvim_set_current_win(origin)
     end
     vim.cmd.stopinsert()
   end
@@ -713,10 +765,11 @@ local function input(title, on_submit, initial)
     end
   end
   local o = { buffer = buf, nowait = true }
-  vim.keymap.set({ "n", "i" }, "<C-s>", submit, o)
-  vim.keymap.set({ "n", "i" }, "<M-s>", function() submit(true) end, o)
-  vim.keymap.set("n", "<CR>", submit, o)
-  vim.keymap.set("n", "q", close, o)
+  local ik = keys.group("input")
+  keys.set({ "n", "i" }, ik.submit, submit, o)
+  keys.set({ "n", "i" }, ik.submit_alt, function() submit(true) end, o)
+  keys.set("n", ik.submit_normal, submit, o)
+  keys.set("n", ik.cancel, close, o)
   -- <Esc> only closes an empty draft, so a habitual double <Esc> loses nothing.
   vim.keymap.set("n", "<Esc>", function()
     if vim.trim(table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n")) == "" then
@@ -851,6 +904,29 @@ function M.toggle_conversation()
 end
 
 ---Open (or refresh in place) the thread float.
+---Footer of the thread window: its keys, as configured.
+function M.thread_footer()
+  local tk = keys.group("thread")
+  local parts = {}
+  local function add(a, b, what)
+    local la, lb = keys.label(tk[a]), b and keys.label(tk[b])
+    if la or lb then
+      parts[#parts + 1] = (la and lb) and (la .. "/" .. lb .. " " .. what) or ((la or lb) .. " " .. what)
+    end
+  end
+  add("next", "prev", "next/prev")
+  add("next_file", "prev_file", "across files")
+  add("reply", nil, "reply")
+  add("edit", nil, "edit")
+  add("send", nil, "send")
+  add("resolve", nil, "resolve")
+  add("delete", nil, "delete")
+  local h, c = keys.list(tk.help)[1], keys.list(tk.close)[1]
+  if h then parts[#parts + 1] = h .. " keys" end
+  if c then parts[#parts + 1] = c .. " close" end
+  return " " .. table.concat(parts, " · ") .. " "
+end
+
 function M.open_thread(root, tid, refresh)
   if M.config.conversation == "panel" then
     return require("code-review.panel").show(root, tid)
@@ -884,7 +960,7 @@ function M.open_thread(root, tid, refresh)
       height = math.min(#lines, math.floor(vim.o.lines / 2)),
       border = "rounded",
       title = " " .. t.id .. " ",
-      footer = " n/p next/prev · N/P across files · r reply · e edit · s send · x resolve · d delete · ? keys · q close ",
+      footer = M.thread_footer(),
       footer_pos = "right",
       style = "minimal",
     })
@@ -894,15 +970,14 @@ function M.open_thread(root, tid, refresh)
     vim.wo[win].concealcursor = "n"
     float ={ buf = buf, win = win, root = root, tid = tid }
     local o = { buffer = buf, nowait = true }
-    vim.keymap.set("n", "q", function() api.nvim_win_close(win, true) end, o)
-    vim.keymap.set("n", "<Esc>", function() api.nvim_win_close(win, true) end, o)
-    vim.keymap.set("n", "r", function() M.reply(root, tid) end, o)
-    vim.keymap.set("n", "e", function() M.edit(root, tid) end, o)
-    vim.keymap.set("n", "s", function() M.poke(root) end, o)
-    vim.keymap.set("n", "?", function() M.help("thread") end, o)
-    vim.keymap.set("n", "g?", function() M.help("thread") end, o)
-    vim.keymap.set("n", "x", function() M.toggle_resolved(root, tid) end, o)
-    vim.keymap.set("n", "d", function() M.delete(root, tid) end, o)
+    local tk = keys.group("thread")
+    keys.set("n", tk.close, function() api.nvim_win_close(win, true) end, o)
+    keys.set("n", tk.reply, function() M.reply(root, tid) end, o)
+    keys.set("n", tk.edit, function() M.edit(root, tid) end, o)
+    keys.set("n", tk.send, function() M.poke(root) end, o)
+    keys.set("n", tk.help, function() M.help("thread") end, o)
+    keys.set("n", tk.resolve, function() M.toggle_resolved(root, tid) end, o)
+    keys.set("n", tk.delete, function() M.delete(root, tid) end, o)
     -- Step to the neighbouring thread in the source buffer without closing.
     local function step(dir)
       if not api.nvim_win_is_valid(src_win) then
@@ -917,14 +992,12 @@ function M.open_thread(root, tid, refresh)
       end
     end
     local km = M.config.keymaps or {}
-    for _, key in ipairs({ "n", km.next or "]r" }) do
-      vim.keymap.set("n", key, function() step(1) end, o)
-    end
-    for _, key in ipairs({ "p", km.prev or "[r" }) do
-      vim.keymap.set("n", key, function() step(-1) end, o)
-    end
-    vim.keymap.set("n", "N", function() M.step_project(src_win, root, tid, 1, vim.v.count1) end, o)
-    vim.keymap.set("n", "P", function() M.step_project(src_win, root, tid, -1, vim.v.count1) end, o)
+    keys.set("n", tk.next, function() step(1) end, o)
+    keys.set("n", km.next, function() step(1) end, o)
+    keys.set("n", tk.prev, function() step(-1) end, o)
+    keys.set("n", km.prev, function() step(-1) end, o)
+    keys.set("n", tk.next_file, function() M.step_project(src_win, root, tid, 1, vim.v.count1) end, o)
+    keys.set("n", tk.prev_file, function() M.step_project(src_win, root, tid, -1, vim.v.count1) end, o)
   end
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -1074,46 +1147,62 @@ local HELP_GLOBAL = {
   { "help", "this help" },
 }
 
+-- Keys of each window: { group, binding (or a literal key in brackets), what it does }.
 local HELP_CONTEXT = {
   panel = {
     title = "Conversation panel",
     keys = {
-      { "i / r", "write a reply (input box)" },
-      { "<C-s> / <CR>", "send (in the input box)" },
-      { "<M-s>", "send and poke the agent" },
-      { "e", "edit your last message" },
-      { "x", "resolve / reopen" },
-      { "d", "delete the thread" },
-      { "s", "poke the agent" },
-      { "q", "close the panel" },
+      { "thread", "reply", "write a reply (input box)" },
+      { "input", "submit", "send (in the input box; <CR> too in normal mode)" },
+      { "input", "submit_alt", "send and poke the agent" },
+      { "thread", "edit", "edit your last message" },
+      { "thread", "resolve", "resolve / reopen" },
+      { "thread", "delete", "delete the thread" },
+      { "thread", "send", "poke the agent" },
+      { "thread", "close", "close the panel" },
     },
   },
   thread = {
     title = "Thread window",
     keys = {
-      { "n / p", "next / previous thread in the file" },
-      { "N / P", "next / previous thread across files" },
-      { "r", "reply (in the box: <C-s> save, <M-s> save + send to agent)" },
-      { "e", "edit your last message" },
-      { "s", "send to the agent (poke)" },
-      { "x", "resolve / reopen" },
-      { "d", "delete the thread" },
-      { "q", "close" },
+      { "thread", "next", "next thread in the file" },
+      { "thread", "prev", "previous thread in the file" },
+      { "thread", "next_file", "next thread across files" },
+      { "thread", "prev_file", "previous thread across files" },
+      { "thread", "reply", "reply (in the box: submit saves, submit_alt saves + sends to the agent)" },
+      { "thread", "edit", "edit your last message" },
+      { "thread", "send", "send to the agent (poke)" },
+      { "thread", "resolve", "resolve / reopen" },
+      { "thread", "delete", "delete the thread" },
+      { "thread", "close", "close" },
+    },
+  },
+  list = {
+    title = "Thread list (quickfix)",
+    keys = {
+      { nil, "<CR> / click", "jump to the thread and open it" },
+      { "thread", "reply", "reply (in the box: submit saves, submit_alt saves + sends to the agent)" },
+      { "thread", "edit", "edit your last message" },
+      { "thread", "resolve", "resolve / reopen" },
+      { "thread", "delete", "delete the thread" },
+      { "thread", "send", "send to the agent (poke)" },
+      { "thread", "close", "close the list" },
     },
   },
   sidebar = {
     title = "Sidebar",
     keys = {
-      { "<CR> / o", "open the file / fold a folder" },
-      { "<Tab> / za", "fold a folder" },
-      { "v", "mark viewed (or not) and go to the next" },
-      { "f", "filter: all / unviewed / with threads / waiting for you / changed since last review" },
-      { "U", "reload the PR (new commits)" },
-      { "S", "changes since your last review / whole PR" },
-      { "]f / [f", "next / previous unreviewed file" },
-      { "d", "PR description" },
-      { "R", "refresh" },
-      { "q", "close the sidebar (:CodeReview files reopens)" },
+      { "sidebar", "open", "open the file / fold a folder" },
+      { "sidebar", "fold", "fold a folder" },
+      { "sidebar", "viewed", "mark viewed (or not) and go to the next" },
+      { "sidebar", "filter", "filter: all / unviewed / with threads / waiting for you / changed since last review" },
+      { "sidebar", "reload", "reload the PR (new commits)" },
+      { "sidebar", "since", "changes since your last review / whole PR" },
+      { nil, "next_file", "next unreviewed file" },
+      { nil, "prev_file", "previous unreviewed file" },
+      { "sidebar", "description", "PR description" },
+      { "sidebar", "refresh", "refresh" },
+      { "sidebar", "close", "close the sidebar (:CodeReview files reopens)" },
     },
   },
 }
@@ -1134,12 +1223,28 @@ function M.help_lines(context)
   end
   local ctx = HELP_CONTEXT[context or ""]
   if ctx then
-    section(ctx.title, ctx.keys)
+    local km, rows = M.config.keymaps or {}, {}
+    for _, k in ipairs(ctx.keys) do
+      -- a binding of the group, a global binding (no group), or a literal ("<CR> / click")
+      local label
+      if k[1] then
+        label = keys.label(keys.group(k[1])[k[2]])
+      elseif km[k[2]] ~= nil then
+        label = keys.label(km[k[2]])
+      else
+        label = k[2]
+      end
+      if label then
+        rows[#rows + 1] = { label, k[3] }
+      end
+    end
+    section(ctx.title, rows)
   end
   local km, rows = M.config.keymaps or {}, {}
   for _, item in ipairs(HELP_GLOBAL) do
-    if km[item[1]] then -- unmapped (false/nil) keys are left out
-      rows[#rows + 1] = { km[item[1]], item[2] }
+    local label = keys.label(km[item[1]]) -- unmapped (false/nil) keys are left out
+    if label then
+      rows[#rows + 1] = { label, item[2] }
     end
   end
   section("Anywhere", rows)
@@ -1508,12 +1613,8 @@ end
 
 ---Threads of the project in the quickfix list.
 ---@param mode? boolean|"all"|"yours" true / "all": resolved too; "yours": only those waiting for you
-function M.list(mode)
-  local root = current_root()
-  local data = safe_read(root)
-  if not data then
-    return
-  end
+---Items, display rows and title of the thread list of `root`.
+local function thread_list(root, data, mode)
   local items, rows, yours, agent = {}, {}, 0, 0
   for _, t in ipairs(M.list_threads(data.threads, mode)) do
     local last = t.messages[#t.messages]
@@ -1532,7 +1633,16 @@ function M.list(mode)
       user_data = t.id,
     }
   end
-  local title = string.format("Code review · %d waiting for you · %d waiting for agent", yours, agent)
+  return items, rows, string.format("Code review · %d waiting for you · %d waiting for agent", yours, agent)
+end
+
+function M.list(mode)
+  local root = current_root()
+  local data = safe_read(root)
+  if not data then
+    return
+  end
+  local items, rows, title = thread_list(root, data, mode)
   vim.fn.setqflist({}, " ", {
     title = title,
     items = items,
@@ -1547,6 +1657,37 @@ function M.list(mode)
   local win = api.nvim_get_current_win()
   vim.wo[win].wrap = false -- one thread per line, long messages are cut at the edge
   color_qf(win)
+end
+
+---After a change to the store: redraw the thread list of `root` in place (same
+---list, cursor kept on the same row as far as it still exists).
+function M.refresh_qf(root, data)
+  local qf = vim.fn.getqflist({ id = 0, context = 1, winid = 0, idx = 0 })
+  local ctx = qf.context
+  if not (type(ctx) == "table" and ctx.code_review_root == root) then
+    return
+  end
+  local cursor = qf.winid ~= 0 and api.nvim_win_get_cursor(qf.winid)
+  local items, rows, title = thread_list(root, data, ctx.code_review_mode)
+  qf_rows[qf.id] = rows
+  vim.fn.setqflist({}, "r", { id = qf.id, items = items, title = title, idx = math.max(1, math.min(qf.idx, #items)) })
+  if cursor and #items > 0 then
+    pcall(api.nvim_win_set_cursor, qf.winid, { math.min(cursor[1], #items), cursor[2] })
+  end
+end
+
+---The thread under the cursor of the thread list (when in it).
+---@return string? root
+---@return string? tid
+function M.qf_thread()
+  local wininfo = vim.fn.getwininfo(api.nvim_get_current_win())[1]
+  if not (wininfo and wininfo.quickfix == 1 and wininfo.loclist ~= 1 and M.is_thread_list()) then
+    return nil
+  end
+  local item = vim.fn.getqflist()[vim.fn.line(".")]
+  if item and type(item.user_data) == "string" then
+    return vim.fn.getqflist({ context = 1 }).context.code_review_root, item.user_data
+  end
 end
 
 ---Close the thread list if it is open in this tab with the same `mode`, else
@@ -1901,8 +2042,15 @@ local function highlights()
   require("code-review.diff").highlights()
 end
 
+local DEFAULTS -- M.config before the first setup
+
 function M.setup(opts)
-  M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  opts = opts or {}
+  -- always from the defaults, so calling setup again (re-sourcing the config) drops old choices
+  DEFAULTS = DEFAULTS or vim.deepcopy(M.config)
+  local km = keys.merge(DEFAULTS.keymaps, opts.keymaps)
+  M.config = vim.tbl_deep_extend("force", vim.deepcopy(DEFAULTS), opts)
+  M.config.keymaps = km
   did_setup = true
   highlights()
   api.nvim_clear_autocmds({ group = group })
@@ -1962,11 +2110,11 @@ function M.setup(opts)
 
   local km = M.config.keymaps or {}
   if km.add then
-    vim.keymap.set("n", km.add, function()
+    keys.set("n", km.add, function()
       local l = api.nvim_win_get_cursor(0)[1]
       M.add(l, l)
     end, { desc = "Code review: add comment" })
-    vim.keymap.set("x", km.add, function()
+    keys.set("x", km.add, function()
       local a, b = vim.fn.line("v"), vim.fn.line(".")
       if a > b then
         a, b = b, a
@@ -1976,69 +2124,69 @@ function M.setup(opts)
     end, { desc = "Code review: comment on selection" })
   end
   if km.open then
-    vim.keymap.set("n", km.open, subcommands.open, { desc = "Code review: open thread" })
+    keys.set("n", km.open, subcommands.open, { desc = "Code review: open thread" })
   end
   if km.panel then
-    vim.keymap.set("n", km.panel, function() M.toggle_conversation() end, { desc = "Code review: threads in float / panel" })
+    keys.set("n", km.panel, function() M.toggle_conversation() end, { desc = "Code review: threads in float / panel" })
   end
   if km.recent then
-    vim.keymap.set("n", km.recent, function() subcommands.recent() end, { desc = "Code review: recent reviews" })
+    keys.set("n", km.recent, function() subcommands.recent() end, { desc = "Code review: recent reviews" })
   end
   if km.layout then
-    vim.keymap.set("n", km.layout, function() subcommands.layout() end, { desc = "Code review: split / unified diff" })
+    keys.set("n", km.layout, function() subcommands.layout() end, { desc = "Code review: split / unified diff" })
   end
   if km.find_file then
-    vim.keymap.set("n", km.find_file, function() subcommands.find() end, { desc = "Code review: pick a PR file" })
+    keys.set("n", km.find_file, function() subcommands.find() end, { desc = "Code review: pick a PR file" })
   end
   if km.find_thread then
-    vim.keymap.set("n", km.find_thread, function() subcommands.threads() end, { desc = "Code review: pick a thread" })
+    keys.set("n", km.find_thread, function() subcommands.threads() end, { desc = "Code review: pick a thread" })
   end
   if km.help then
-    vim.keymap.set("n", km.help, function() M.help() end, { desc = "Code review: keys" })
+    keys.set("n", km.help, function() M.help() end, { desc = "Code review: keys" })
   end
   if km.inline then
-    vim.keymap.set("n", km.inline, M.toggle_inline, { desc = "Code review: inline conversations" })
+    keys.set("n", km.inline, M.toggle_inline, { desc = "Code review: inline conversations" })
   end
   if km.next_yours then
-    vim.keymap.set("n", km.next_yours, function() M.jump_yours(1) end, { desc = "Code review: next thread waiting for you" })
+    keys.set("n", km.next_yours, function() M.jump_yours(1) end, { desc = "Code review: next thread waiting for you" })
   end
   if km.prev_yours then
-    vim.keymap.set("n", km.prev_yours, function() M.jump_yours(-1) end, { desc = "Code review: previous thread waiting for you" })
+    keys.set("n", km.prev_yours, function() M.jump_yours(-1) end, { desc = "Code review: previous thread waiting for you" })
   end
   if km.output then
-    vim.keymap.set("n", km.output, function() subcommands.output() end, { desc = "Code review: live agent output" })
+    keys.set("n", km.output, function() subcommands.output() end, { desc = "Code review: live agent output" })
   end
   if km.auto_poke then
-    vim.keymap.set("n", km.auto_poke, M.toggle_auto_poke, { desc = "Code review: toggle sending comments to the agent on <C-s>" })
+    keys.set("n", km.auto_poke, M.toggle_auto_poke, { desc = "Code review: toggle sending comments to the agent on <C-s>" })
   end
   if km.poke then
-    vim.keymap.set("n", km.poke, function() subcommands.poke() end, { desc = "Code review: poke the agent" })
+    keys.set("n", km.poke, function() subcommands.poke() end, { desc = "Code review: poke the agent" })
   end
   if km.edit then
-    vim.keymap.set("n", km.edit, subcommands.edit, { desc = "Code review: edit my comment" })
+    keys.set("n", km.edit, subcommands.edit, { desc = "Code review: edit my comment" })
   end
   if km.resolve then
-    vim.keymap.set("n", km.resolve, subcommands.resolve, { desc = "Code review: resolve/reopen thread" })
+    keys.set("n", km.resolve, subcommands.resolve, { desc = "Code review: resolve/reopen thread" })
   end
   if km.list then
-    vim.keymap.set("n", km.list, function() M.toggle_list(false) end, { desc = "Code review: toggle the open threads list" })
+    keys.set("n", km.list, function() M.toggle_list(false) end, { desc = "Code review: toggle the open threads list" })
   end
   if km.list_all then
-    vim.keymap.set("n", km.list_all, function() M.toggle_list(true) end, { desc = "Code review: toggle the list of all threads" })
+    keys.set("n", km.list_all, function() M.toggle_list(true) end, { desc = "Code review: toggle the list of all threads" })
   end
   if km.next then
-    vim.keymap.set("n", km.next, function() M.jump(1, vim.v.count1) end, { desc = "Code review: next thread" })
+    keys.set("n", km.next, function() M.jump(1, vim.v.count1) end, { desc = "Code review: next thread" })
   end
   if km.prev then
-    vim.keymap.set("n", km.prev, function() M.jump(-1, vim.v.count1) end, { desc = "Code review: previous thread" })
+    keys.set("n", km.prev, function() M.jump(-1, vim.v.count1) end, { desc = "Code review: previous thread" })
   end
 
   require("code-review.diff").attach_quickfix(group)
   if km.viewed then
-    vim.keymap.set("n", km.viewed, subcommands.viewed, { desc = "Code review: toggle file viewed" })
+    keys.set("n", km.viewed, subcommands.viewed, { desc = "Code review: toggle file viewed" })
   end
   if km.description then
-    vim.keymap.set("n", km.description, subcommands.description, { desc = "Code review: PR description" })
+    keys.set("n", km.description, subcommands.description, { desc = "Code review: PR description" })
   end
 
   if M.config.add_bin_to_path then

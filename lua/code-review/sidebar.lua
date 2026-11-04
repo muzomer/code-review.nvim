@@ -171,29 +171,25 @@ local function map_keys(buf)
   local diff = function()
     return require("code-review.diff")
   end
-  vim.keymap.set("n", "<CR>", function() M.activate() end, o("open file / fold folder"))
-  vim.keymap.set("n", "o", function() M.activate() end, o("open file / fold folder"))
-  vim.keymap.set("n", "<Tab>", function() M.toggle_dir() end, o("fold folder"))
-  vim.keymap.set("n", "za", function() M.toggle_dir() end, o("fold folder"))
-  vim.keymap.set("n", "v", function() M.toggle_viewed_row() end, o("toggle viewed"))
-  vim.keymap.set("n", "R", function() M.refresh_all() end, o("refresh"))
+  local keys = require("code-review.keys")
+  local sk = keys.group("sidebar")
+  keys.set("n", sk.open, function() M.activate() end, o("open file / fold folder"))
+  keys.set("n", sk.fold, function() M.toggle_dir() end, o("fold folder"))
+  keys.set("n", sk.viewed, function() M.toggle_viewed_row() end, o("toggle viewed"))
+  keys.set("n", sk.refresh, function() M.refresh_all() end, o("refresh"))
   if require("code-review").config.mouse ~= false then
     -- the click moves the cursor to the row; act on release
     vim.keymap.set("n", "<LeftRelease>", function() M.activate() end, o("open the clicked file / fold the folder"))
   end
-  vim.keymap.set("n", "f", function() M.set_filter(vim.b[buf].code_review_sidebar) end, o("filter: all / unviewed / with threads / waiting for you"))
-  vim.keymap.set("n", "U", function() diff().reload(vim.b[buf].code_review_sidebar) end, o("reload the PR (new commits)"))
-  vim.keymap.set("n", "S", function() diff().toggle_since(vim.b[buf].code_review_sidebar) end, o("changes since your last review"))
-  vim.keymap.set("n", "q", function() M.close() end, o("close"))
+  keys.set("n", sk.filter, function() M.set_filter(vim.b[buf].code_review_sidebar) end, o("filter: all / unviewed / with threads / waiting for you"))
+  keys.set("n", sk.reload, function() diff().reload(vim.b[buf].code_review_sidebar) end, o("reload the PR (new commits)"))
+  keys.set("n", sk.since, function() diff().toggle_since(vim.b[buf].code_review_sidebar) end, o("changes since your last review"))
+  keys.set("n", sk.close, function() M.close() end, o("close"))
   local km = require("code-review").config.keymaps or {}
-  vim.keymap.set("n", km.next_file or "]f", function() diff().step(1) end, o("next unreviewed file"))
-  vim.keymap.set("n", km.prev_file or "[f", function() diff().step(-1) end, o("previous unreviewed file"))
-  vim.keymap.set("n", "d", function()
-    diff().description(vim.b[buf].code_review_sidebar)
-  end, o("PR description"))
-  for _, key in ipairs({ "?", "g?" }) do
-    vim.keymap.set("n", key, function() require("code-review").help("sidebar") end, o("help"))
-  end
+  keys.set("n", km.next_file, function() diff().step(1) end, o("next unreviewed file"))
+  keys.set("n", km.prev_file, function() diff().step(-1) end, o("previous unreviewed file"))
+  keys.set("n", sk.description, function() diff().description(vim.b[buf].code_review_sidebar) end, o("PR description"))
+  keys.set("n", sk.help, function() require("code-review").help("sidebar") end, o("help"))
 end
 
 local function new_buf(root)

@@ -396,3 +396,61 @@ describe("thread float navigation across files", function()
     press("q")
   end)
 end)
+
+describe("thread list: actions", function()
+  ac.setup({ notify = false })
+  local root = tmp_project({ ["a.lua"] = { "1", "2", "3", "4" } })
+  for _, line in ipairs({ 1, 3 }) do
+    store.update(root, function(d)
+      store.add_thread(d, { file = "a.lua", start = line, ["end"] = line, anchor = { text = { tostring(line) } }, author = "user", body = "q" .. line })
+    end)
+  end
+  local function keys(k)
+    api.nvim_feedkeys(api.nvim_replace_termcodes(k, true, false, true), "x", false)
+  end
+  local function threads()
+    return store.read(root).threads
+  end
+
+  it("replies, edits, resolves and deletes the thread under the cursor, and keeps the list current", function()
+    vim.cmd.edit(root .. "/a.lua")
+    ac.list()
+    eq(vim.bo.filetype, "qf")
+    local tid = vim.fn.getqflist()[1].user_data
+
+    keys("e") -- your last message, in the box
+    api.nvim_buf_set_lines(0, 0, -1, false, { "q1 edited" })
+    keys("<C-s>")
+    eq(vim.bo.filetype, "qf") -- back in the list
+    eq(store.find(store.read(root), tid).messages[1].body, "q1 edited")
+    assert(vim.fn.getqflist()[1].text:find("q1 edited", 1, true), vim.fn.getqflist()[1].text)
+
+    keys("r")
+    api.nvim_buf_set_lines(0, 0, -1, false, { "more" })
+    keys("<C-s>")
+    eq(#store.find(store.read(root), tid).messages, 2)
+
+    keys("x") -- resolved: it leaves the list of open threads
+    eq(store.find(store.read(root), tid).status, "resolved")
+    eq(#vim.fn.getqflist(), 1)
+    eq(vim.bo.filetype, "qf")
+
+    local confirm = vim.fn.confirm
+    vim.fn.confirm = function() return 1 end
+    keys("d")
+    vim.fn.confirm = confirm
+    eq(#threads(), 1)
+    eq(#vim.fn.getqflist(), 0)
+    vim.cmd("cclose")
+  end)
+
+  it("leaves the keys alone in other lists", function()
+    vim.fn.setqflist({ { filename = root .. "/a.lua", lnum = 1, text = "x" }, { filename = root .. "/a.lua", lnum = 2, text = "y" } }, " ")
+    vim.cmd.copen()
+    vim.fn.setreg("/", "")
+    keys("G?x<CR>") -- ? still searches backward
+    eq(vim.fn.getreg("/"), "x")
+    eq(#threads(), 1)
+    vim.cmd("cclose")
+  end)
+end)
