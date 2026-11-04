@@ -16,7 +16,8 @@ vim.o.shortmess = vim.o.shortmess .. "IF"
 
 require("code-review").setup({
   agent = "headless",
-  headless = { cmd = repo .. "/demo/bin/claude" },
+  -- the stand-in answers from a script; DEMO_REAL_AGENT=1 lets the real `claude` answer
+  headless = { cmd = vim.env.DEMO_REAL_AGENT ~= "1" and (repo .. "/demo/bin/claude") or nil },
 })
 
 -- A caption across the top, set with :Caption <text> (typed while the recording is hidden).
