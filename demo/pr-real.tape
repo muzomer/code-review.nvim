@@ -31,7 +31,7 @@ Type ":Caption 2 · The changed files on the left, a side-by-side diff on the ri
 Enter
 Type "194Gzz"
 Show
-Sleep 4s
+Sleep 1.5s
 
 # ask why the fix works
 Hide
@@ -57,9 +57,13 @@ Wait+Screen@300s /done in/
 Type ":Caption 5 · Claude's answer, in the thread (waiting time cut)"
 Enter
 Show
-Sleep 2s
-Type "G"
-Sleep 9s
+Sleep 3.5s
+Ctrl+D
+Sleep 4.5s
+Ctrl+D
+Sleep 4.5s
+Ctrl+D
+Sleep 4s
 Type "q"
 Sleep 600ms
 

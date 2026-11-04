@@ -293,14 +293,14 @@ function M.send(root, opts)
   end
   local function go(target)
     if target.pane_id == M.HEADLESS then
-      local text, sent = prompt.build(root, { style = "background" })
+      local text, sent = prompt.build(root, { style = "background", author = (require("code-review").config.headless or {}).agent or "claude" })
       return background(text, sent, target)
     end
     local adapter = require("code-review.agents").get(target.agent or "claude")
     if isolate == "fork" and adapter and adapter.fork and headless.available(target.agent or "claude") then
       local fork = M.session_of(target)
       if fork then
-        local text, sent = prompt.build(root, { style = "fork" })
+        local text, sent = prompt.build(root, { style = "fork", author = target.agent or "claude" })
         return background(text, sent, { pane_id = M.HEADLESS, title = target.title .. " (fork)" }, fork)
       end
     end

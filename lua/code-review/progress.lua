@@ -93,9 +93,15 @@ end
 local function use_float()
   local mode = require("code-review").config.progress_float
   if mode == nil then
-    mode = "auto"
+    mode = true
   end
   return mode == true or (mode == "auto" and not winbar_visible())
+end
+
+---Does a PR review winbar show the status? Only when the float does not
+---(a long status there would push out the branch and file).
+function M.in_winbar()
+  return require("code-review").config.progress ~= false and not use_float()
 end
 
 local ns_status = api.nvim_create_namespace("code-review-progress")

@@ -295,6 +295,11 @@ function M.foldtext()
   return { { string.format("  ⋯  %d unchanged line%s", n, n == 1 and "" or "s"), "CodeReviewFold" } }
 end
 
+---Width the winbar of a diff pane fits into (replaceable in tests).
+function M.pane_width(win)
+  return api.nvim_win_get_width(win)
+end
+
 ---Winbar of a PR diff pane: which side, which commit, where in the PR.
 ---(Evaluated by Neovim on redraw for the window being drawn.)
 function M.winbar()
@@ -317,15 +322,23 @@ function M.winbar()
   local function esc(x)
     return (tostring(x or "?"):gsub("%%", "%%%%"))
   end
+  -- a long branch name keeps its start (where the meaning is); the pane may still cut it
+  local function ref(x)
+    x = tostring(x or "?")
+    if vim.fn.strchars(x) > 24 then
+      x = vim.fn.strcharpart(x, 0, 23) .. "…"
+    end
+    return esc(x)
+  end
   if side == "both" then
     local since = require("code-review.unified").is_since(wbuf)
     local parts = {
       since and string.format(
         " %%#CodeReviewWinbarNew#SINCE YOUR LAST REVIEW%%* %%<%%#CodeReviewWinbarDim#@%s%%* → %s %%#CodeReviewWinbarDim#@%s%%*",
-        esc(((s.previous or {}).head_sha or ""):sub(1, 7)), esc(s.head_ref), esc((s.head_sha or ""):sub(1, 7))
+        esc(((s.previous or {}).head_sha or ""):sub(1, 7)), ref(s.head_ref), esc((s.head_sha or ""):sub(1, 7))
       ) or string.format(
         " %%#CodeReviewWinbarNew#UNIFIED%%* %%<%s %%#CodeReviewWinbarDim#@%s%%* → %s %%#CodeReviewWinbarDim#@%s%%*",
-        esc(s.base_ref), esc((s.base_sha or ""):sub(1, 7)), esc(s.head_ref), esc((s.head_sha or ""):sub(1, 7))
+        ref(s.base_ref), esc((s.base_sha or ""):sub(1, 7)), ref(s.head_ref), esc((s.head_sha or ""):sub(1, 7))
       ),
     }
     if i then
@@ -339,34 +352,62 @@ function M.winbar()
       parts[#parts + 1] = "%#CodeReviewWinbarCtx#" .. esc(where) .. "%*"
     end
     local bar = table.concat(parts, " · ")
-    local p = require("code-review").config.progress ~= false and require("code-review.progress").current()
+    local p = require("code-review.progress").in_winbar() and require("code-review.progress").current()
     if p then
       bar = bar .. "%=%#" .. p.hl .. "#" .. esc(p.text) .. " %*"
     end
     return bar
   end
-  if side == "old" then
-    -- %< : on a narrow pane cut the details, never the side label
-    local where = M.context(win)
-    return string.format(" %%#CodeReviewWinbarOld#OLD%%* %%<%s %%#CodeReviewWinbarDim#@%s%%*", esc(s.base_ref), esc((s.base_sha or ""):sub(1, 7)))
-      .. (where ~= "" and (" · %#CodeReviewWinbarCtx#" .. esc(where) .. "%*") or "")
-  end
-  local parts = {
-    string.format(" %%#CodeReviewWinbarNew#NEW%%* %%<%s %%#CodeReviewWinbarDim#@%s%%*", esc(s.head_ref), esc((s.head_sha or ""):sub(1, 7))),
-  }
-  if i then
-    parts[#parts + 1] = string.format("%%#CodeReviewWinbarDim#file %d/%d%%*", i, n)
-  end
-  if c.viewed[file] then
-    parts[#parts + 1] = "%#CodeReviewQfCheck#✓ viewed%*"
+  -- A split pane is narrow: fit the header to it. The side label and the start
+  -- of the branch come first; the function name only shows when there is room.
+  local width = M.pane_width(win)
+  local dw = vim.fn.strdisplaywidth
+  local function fit(name, fixed)
+    name = tostring(name or "?")
+    local room = math.max(6, math.min(24, width - fixed))
+    if vim.fn.strchars(name) > room then
+      name = vim.fn.strcharpart(name, 0, room - 1) .. "…"
+    end
+    return name
   end
   local where = M.context(win)
-  if where ~= "" then
+  if side == "old" then
+    local sha = (s.base_sha or ""):sub(1, 7)
+    local name = fit(s.base_ref, 6 + #sha + 2)
+    local used = 5 + dw(name) + 2 + #sha
+    return string.format(" %%#CodeReviewWinbarOld#OLD%%* %%<%s %%#CodeReviewWinbarDim#@%s%%*", esc(name), esc(sha))
+      .. ((where ~= "" and used + 3 + dw(where) <= width) and (" · %#CodeReviewWinbarCtx#" .. esc(where) .. "%*") or "")
+  end
+  local sha = (s.head_sha or ""):sub(1, 7)
+  local pos = i and string.format("file %d/%d", i, n) or nil
+  local viewed = c.viewed[file] == true
+  local function tail()
+    return (pos and (3 + #pos) or 0) + (viewed and 11 or 0)
+  end
+  -- too narrow even for the shortest branch name: drop "viewed", then the position
+  if viewed and 5 + 6 + 2 + #sha + tail() > width then
+    viewed = false
+  end
+  if pos and 5 + 6 + 2 + #sha + tail() > width then
+    pos = nil
+  end
+  local name = fit(s.head_ref, 6 + #sha + 2 + tail())
+  local used = 5 + dw(name) + 2 + #sha + tail()
+  local parts = {
+    string.format(" %%#CodeReviewWinbarNew#NEW%%* %%<%s %%#CodeReviewWinbarDim#@%s%%*", esc(name), esc(sha)),
+  }
+  if pos then
+    parts[#parts + 1] = "%#CodeReviewWinbarDim#" .. pos .. "%*"
+  end
+  if viewed then
+    parts[#parts + 1] = "%#CodeReviewQfCheck#✓ viewed%*"
+  end
+  if where ~= "" and used + 3 + dw(where) <= width then
     parts[#parts + 1] = "%#CodeReviewWinbarCtx#" .. esc(where) .. "%*"
   end
   local bar = table.concat(parts, " · ")
   -- the agent's progress after a poke, right-aligned
-  local p = require("code-review").config.progress ~= false and require("code-review.progress").current()
+  local p = require("code-review.progress").in_winbar() and require("code-review.progress").current()
   if p then
     bar = bar .. "%=%#" .. p.hl .. "#" .. esc(p.text) .. " %*"
   end

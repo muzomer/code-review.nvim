@@ -9,6 +9,7 @@ local progress = require("code-review.progress")
 local ac = require("code-review")
 
 local api = vim.api
+require("code-review.diff").pane_width = function() return 200 end -- full winbars (narrow panes are tested apart)
 progress.use_timer = false
 
 local routes = {
@@ -151,22 +152,43 @@ describe("review UI", function()
       end
     end
 
-    case("goes into the NEW pane's winbar during a review, with no float", function()
+    case("keeps the start of a long branch name in the winbar", function()
+      local sess = session.load(root)
+      local head = sess.head_ref
+      sess.head_ref = "fix-lsp-sync-noop-edit-in-empty-buffer"
+      session.save(root, sess)
+      diff.show_file(root, "src/app/a.py")
+      local new = winbar_text(wins_by_side().new, 200)
+      assert(new:find("fix-lsp-sync-noop-edit-…", 1, true), new) -- at most 24 characters
+      -- a narrow pane: the start of the branch stays, the function name goes
+      local wide = diff.pane_width
+      diff.pane_width = function() return 30 end
+      local w = wins_by_side().new
+      local text = winbar_text(w, 30)
+      diff.pane_width = wide
+      assert(text:find("NEW fix", 1, true), text)
+      assert(vim.fn.strdisplaywidth(text) <= 30 and not text:find("<", 1, true), text)
+      sess.head_ref = head
+      session.save(root, sess)
+    end)
+
+    case("shows in a float during a review, leaving the winbar to the branch and file", function()
+      diff.show_file(root, "src/app/a.py")
+      progress.start(root, { pane_id = "w1:p1", title = "Reviewer" })
+      assert(status_float(), "float expected")
+      assert(not winbar_text(wins_by_side().new, 200):find("Reviewer", 1, true))
+      eq(ac.status():find("Reviewer", 1, true) ~= nil, true) -- and for lualine
+    end)
+
+    case("goes into the NEW pane's winbar instead with progress_float = \"auto\"", function()
+      ac.config.progress_float = "auto"
       diff.show_file(root, "src/app/a.py")
       progress.start(root, { pane_id = "w1:p1", title = "Reviewer" })
       local new = winbar_text(wins_by_side().new, 200)
       assert(new:find("Reviewer", 1, true) and new:find("sent", 1, true), new)
       assert(not winbar_text(wins_by_side().old, 200):find("Reviewer", 1, true))
       eq(status_float(), nil)
-      eq(ac.status():find("Reviewer", 1, true) ~= nil, true) -- and for lualine
-    end)
-
-    case("uses the float as well when progress_float = true", function()
       ac.config.progress_float = true
-      diff.show_file(root, "src/app/a.py")
-      progress.start(root, { pane_id = "w1:p1", title = "Reviewer" })
-      assert(status_float(), "float expected")
-      ac.config.progress_float = "auto"
     end)
 
     case("leaves the winbar clean once nothing is followed", function()

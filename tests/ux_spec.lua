@@ -11,6 +11,7 @@ local sidebar = require("code-review.sidebar")
 local ac = require("code-review")
 
 local api = vim.api
+require("code-review.diff").pane_width = function() return 200 end -- full winbars (narrow panes are tested apart)
 progress.use_timer = false
 
 local LUA_BASE = { "local M = {}", "", "function M.add(a, b)", "  return a + b", "end", "", "function M.sub(a, b)", "  return a - b", "end", "", "return M" }

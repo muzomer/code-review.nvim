@@ -29,6 +29,13 @@ describe("poke prompt", function()
     eq(counts, { new = 1, followup = 0, waiting = 0 })
   end)
 
+  it("asks a background agent to sign its replies with its name", function()
+    local root = tmp_project({ ["a.lua"] = { "x" } })
+    add(root, { file = "a.lua", start = 1, ["end"] = 1, anchor = { text = { "x" } }, body = "why?" })
+    assert(prompt.build(root, { style = "background", author = "claude" }):find('reply <id> "..." --author claude', 1, true))
+    assert(not prompt.build(root, { style = "plain", all = true }):find("--author", 1, true))
+  end)
+
   it("sends only what changed since the last poke; the rest is named", function()
     local root = tmp_project({ ["a.lua"] = { "x" } })
     local first = add(root, { file = "a.lua", start = 1, ["end"] = 1, anchor = { text = { "x" } }, body = "one" })

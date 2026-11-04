@@ -82,7 +82,7 @@ M.config = {
   notify_group_ms = 1500, -- replies arriving within this window become one notification
   flash_ms = 350, -- briefly highlight where a jump lands (0 / false: off)
   progress = true, -- after a poke, show the agent's state (working / done / waiting)
-  progress_float = "auto", -- where: true = floating window, false = winbar/statusline only, "auto" = float only outside a PR review
+  progress_float = true, -- where: true = floating window, false = winbar/statusline only, "auto" = winbar in a PR review, else float
   progress_output = false, -- ... and also open the live output window right away
   auto_poke = false, -- <C-s> in the comment box also pokes the agent (then <M-s> only saves); toggle: keymaps.auto_poke
   open_after_send = true, -- after <M-s> on a new comment, open its thread to watch the reply come in

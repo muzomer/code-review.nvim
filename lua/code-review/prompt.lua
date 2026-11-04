@@ -93,7 +93,8 @@ M.STYLE = {
 }
 
 ---Build the prompt for the threads waiting on the agent.
----@param opts? { style?: "subagent"|"fork"|"background"|"plain", all?: boolean } all: ignore what was sent before
+---@param opts? { style?: "subagent"|"fork"|"background"|"plain", all?: boolean, author?: string }
+---all: ignore what was sent before; author: the name the agent signs its replies with
 ---@return string? text nil when no thread waits on the agent
 ---@return table sent signatures to record with `M.mark_sent` once the prompt is delivered
 ---@return { new: integer, followup: integer, waiting: integer } counts
@@ -170,8 +171,9 @@ function M.build(root, opts)
     lines[#lines + 1] = string.format("%s from before: %s (`%s show <id>`).", #fresh > 0 and "Also still open" or "Open",
       table.concat(older, ", "), cli)
   end
-  lines[#lines + 1] = string.format("Reply in each thread with `%s reply <id> \"...\"` (or `- ` and the body on stdin for long replies);"
-    .. " resolve with `%s resolve <id>` only once the request is settled. `code-review skill` explains the workflow.", cli, cli)
+  local author = opts.author and (" --author " .. opts.author) or ""
+  lines[#lines + 1] = string.format("Reply in each thread with `%s reply <id> \"...\"%s` (or `- ` and the body on stdin for long replies);"
+    .. " resolve with `%s resolve <id>` only once the request is settled. `code-review skill` explains the workflow.", cli, author, cli)
   if pr then
     lines[#lines + 1] = string.format("There is no checkout: `%s diff` prints where the base/head snapshots of the changed files are;"
       .. " for any other file run `%s file <path>` and read the path it prints. You cannot change the PR,"
