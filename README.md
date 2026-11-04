@@ -88,6 +88,8 @@ an agent opened.
 
 ## Reviewing a PR (no checkout)
 
+![Reviewing a GitHub PR without a checkout and asking an agent about it](demo/code-review-pr.gif)
+
 Review a GitHub PR from any directory; nothing is cloned or checked out.
 
 ```sh
@@ -340,9 +342,10 @@ Highlights are defined with `default = true`, so your colorscheme or your own
 make test   # nvim --clean -l tests/run.lua
 ```
 
-The GIF above is recorded with [VHS](https://github.com/charmbracelet/vhs): `demo/record.sh`
-builds a throwaway project in `/tmp/api` and runs `demo/demo.tape`; a stand-in `claude`
-(`demo/bin/claude`) answers through the real CLI, so no model runs.
+The GIFs are recorded with [VHS](https://github.com/charmbracelet/vhs): `demo/record.sh`
+(a throwaway project in `/tmp/api`, `demo/demo.tape`) and `demo/record-pr.sh` (an invented
+PR served by a stand-in `curl`, `demo/pr.tape`). A stand-in `claude` (`demo/bin/claude`)
+answers through the real CLI, so no model runs and no network is used.
 
 ## License
 

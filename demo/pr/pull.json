@@ -1,0 +1,25 @@
+{
+ "title": "Retry failed webhook deliveries with exponential backoff",
+ "body": "Webhook deliveries that fail are retried up to 5 times, with exponential backoff and jitter.\n\n- `retry.py`: the delays between attempts\n- `dispatcher.py`: `deliver_with_retry()` used by `dispatch()`\n- tests for the delays",
+ "user": {
+  "login": "dana"
+ },
+ "html_url": "https://github.com/acme/payments/pull/128",
+ "state": "open",
+ "draft": false,
+ "merged": false,
+ "commits": 3,
+ "labels": [
+  {
+   "name": "reliability"
+  }
+ ],
+ "base": {
+  "sha": "a1b2c3d4e5f6",
+  "ref": "main"
+ },
+ "head": {
+  "sha": "f6e5d4c3b2a1",
+  "ref": "webhook-retries"
+ }
+}

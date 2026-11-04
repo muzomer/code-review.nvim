@@ -10,6 +10,15 @@ def emit(content):
     print(json.dumps({"type": "assistant", "message": {"content": content}}), flush=True)
 
 REPLIES = [
+    ("random.uniform", "So clients that failed together do not retry together.\n\n"
+     "When the receiver goes down, every delivery fails at the same moment. With exact delays "
+     "(0.5 s, 1 s, 2 s...) they would all come back at the same instants and hit it in waves.\n\n"
+     "Full jitter picks a random delay in `[0, ceiling]`: the retries spread out, while the "
+     "*average* wait still grows exponentially."),
+    ("time.sleep", "Yes: `dispatch()` delivers the hooks one after the other, so while one hook retries, "
+     "the others wait.\n\n"
+     "With 5 attempts the delays add up to at most 0.5 + 1 + 2 + 4 + 8 = 15.5 s for a single dead "
+     "endpoint. Fine for a few hooks; with many, a queue or a thread pool would keep them independent."),
     ("elapsed", "It refills lazily, on each call, for the time that passed since the last one:\n\n"
      "- `elapsed * self.rate`: tokens earned meanwhile (0.4 s at 5/s = 2 tokens)\n"
      "- `min(self.capacity, ...)`: caps it, so a long idle time saves up one burst at most\n"
@@ -19,6 +28,9 @@ REPLIES = [
      "A jump back makes `elapsed` negative and *removes* tokens; a jump forward refills the bucket at once.\n"
      "`time.monotonic()` only moves forward, so `elapsed` is always the real time that passed."),
 ]
+
+m = re.search(r"code-review --pr (\S+)", prompt)
+pr = ["--pr", m.group(1)] if m else []  # a PR review: no checkout, the CLI finds it by its ref
 
 time.sleep(0.8)
 emit([{"type": "text", "text": "Reading the review comments."}])
@@ -31,7 +43,7 @@ for block in blocks:
     body = next((r for key, r in REPLIES if key in block), "Good question: see the code above.")
     time.sleep(1.2)
     emit([{"type": "tool_use", "name": "Bash", "input": {"command": "code-review reply %s ..." % tid}}])
-    subprocess.run([cli, "reply", tid, body, "--author", "claude"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([cli, *pr, "reply", tid, body, "--author", "claude"], check=True, stdout=subprocess.DEVNULL)
 time.sleep(0.5)
 emit([{"type": "text", "text": "Answered the review threads."}])
 print(json.dumps({"type": "result", "is_error": False, "result": "ok"}), flush=True)

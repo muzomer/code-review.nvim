@@ -1008,9 +1008,14 @@ function M.fetch(root, ref)
         table.sort(bad)
         notify(string.format("%d file(s) could not be downloaded: %s", #bad, table.concat(bad, ", ")), vim.log.levels.WARN)
       end
-      local help = require("code-review.keys").label((require("code-review").config.keymaps or {}).help) or "? in the sidebar"
-      local since = s.previous and " · changes since your last review: :CodeReview since" or ""
-      notify(string.format("%s: %d changed files. <CR> in the sidebar opens a diff; ]f / [f step through files; %s lists all keys%s.", name, #s.files, help, since))
+      local cr = require("code-review")
+      local km = cr.config.keymaps or {}
+      local step = require("code-review.keys").label(km.next_file)
+      local help = require("code-review.keys").label(km.help) or "?"
+      local since = s.previous and " · :CodeReview since: changes since your last review" or ""
+      -- one line: a longer message stops Neovim at "Press ENTER"
+      vim.notify(cr.one_line(string.format("code-review: %s: %d changed files%s · %s keys%s", name, #s.files,
+        step and (" · " .. step .. " next file") or "", help, since)))
       if had and was_shown then
         M.show_file(r, was_shown) -- the same file, now at the new commit
       end
