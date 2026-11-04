@@ -51,6 +51,8 @@ M.config = {
   auto_poke = false, -- <C-s> in the comment box also pokes the agent (then <M-s> only saves); toggle: keymaps.auto_poke
   open_after_send = true, -- after <M-s> on a new comment, open its thread to watch the reply come in
   agent = "auto", -- who gets poked: "auto" (a herdr agent you pick, else the background agent), "herdr", "headless"
+  isolate = "fork", -- keep the work out of a herdr agent's session: "fork" (a throwaway copy of it answers in the
+  -- background; falls back to "subagent"), "subagent" (typed in, the agent delegates to a subagent), false (typed in as is)
   headless = { -- the background agent: `claude -p`, one resumable conversation per review
     cmd = "claude",
     allowed_tools = nil, -- default: code-review CLI + Read/Grep/Glob; add "Edit" etc. to let it change local code
@@ -1255,7 +1257,7 @@ function M.status()
 end
 
 function M.poke(root, opts)
-  require("code-review.poke").send(root, M.prompt_for(root), opts)
+  require("code-review.poke").send(root, opts)
 end
 
 ---Poke after a comment was saved, when it was sent to the agent (`now`: <M-s>,
@@ -1633,16 +1635,13 @@ end
 M.prompt = [[I left review comments on the code for you. Run `code-review list --needs agent` to see them (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> "..."`, make any changes requested, and only resolve a thread with `code-review resolve <id>` once the change is done.]]
 
 ---The prompt for the agent; in a PR review every command needs `--pr`.
+---The prompt for the agent: every thread waiting on it, in full (for copying).
 function M.prompt_for(root)
-  local s = root and session.load(root)
-  if not (s and s.kind == "pr") then
+  if not root then
     return M.prompt
   end
-  local ref = string.format("%s/%s#%d", s.owner, s.repo, s.number)
-  return string.format(
-    [[I am reviewing PR %s in Neovim (no checkout) and left comments for you. Run `code-review --pr %s list --needs agent` to see them and `code-review --pr %s diff` for the changed files and where their base/head snapshots live (`code-review skill` explains the workflow). Read code from those snapshot paths; for any other file run `code-review --pr %s file <path>` and read the path it prints. Reply in each thread with `code-review --pr %s reply <id> "..."`, and only resolve a thread with `resolve` once the requested change is settled. You cannot change the PR itself, so answer with explanations or suggested code.]],
-    ref, ref, ref, ref, ref
-  )
+  local prompt = require("code-review.prompt")
+  return prompt.build(root, { style = "plain", all = true }) or prompt.generic(root)
 end
 
 function M.copy_prompt()

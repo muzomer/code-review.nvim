@@ -396,13 +396,6 @@ local HOOK_INSTRUCTIONS = {
 }
 
 local function hook(root)
-  local mode = os.getenv("NVIM_CODE_REVIEW_HOOK") or ""
-  if mode == "off" then
-    return
-  end
-  if not HOOK_INSTRUCTIONS[mode] then
-    mode = "mention"
-  end
   local input = {}
   local raw = io.read("a") or ""
   if raw ~= "" then
@@ -410,6 +403,19 @@ local function hook(root)
     if ok and type(decoded) == "table" then
       input = decoded
     end
+  end
+  -- Which Claude Code session runs in this herdr pane, so a poke can fork it
+  -- (the exact id; herdr's own guess can be another claude started from it).
+  local pane = os.getenv("HERDR_PANE_ID")
+  if pane and pane ~= "" and input.session_id then
+    pcall(require("code-review.poke").record_session, pane, input.session_id, input.transcript_path)
+  end
+  local mode = os.getenv("NVIM_CODE_REVIEW_HOOK") or ""
+  if mode == "off" then
+    return
+  end
+  if not HOOK_INSTRUCTIONS[mode] then
+    mode = "mention"
   end
   if input.cwd then
     root = store.find_root(input.cwd)

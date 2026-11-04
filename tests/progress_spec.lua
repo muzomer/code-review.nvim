@@ -301,11 +301,17 @@ describe("progress", function()
       })
     end)
     ac.poke(fresh)
-    store.update(fresh, function(d) store.add_message(store.find(d, id), "agent", "ok") end) -- answered: nothing waits any more
+    store.update(fresh, function(d) store.add_message(store.find(d, id), "agent", "ok") end) -- answered
+    store.update(fresh, function(d) -- and a new comment
+      return store.add_thread(d, {
+        file = "f.lua", start = 2, ["end"] = 2,
+        anchor = anchor.capture({ "one", "two" }, 2, 2), author = "user", body = "and this",
+      })
+    end)
     ac.poke(fresh)
     agent_status = "working"
     progress.tick()
-    assert(not status_text():find("answered", 1, true), tostring(status_text())) -- no thread was waiting at the second poke
+    assert(status_text():find("0/1 answered", 1, true), tostring(status_text())) -- only the new thread counts
     restore()
   end)
 end)

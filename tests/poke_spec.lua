@@ -50,6 +50,9 @@ describe("poke", function()
   end
 
   local root = tmp_project({ ["f.lua"] = { "one", "two", "three" } })
+  store.update(root, function(d) -- a comment waiting for the agent, so pokes have something to send
+    return store.add_thread(d, { file = "f.lua", start = 1, ["end"] = 1, anchor = { text = { "one" } }, author = "user", body = "first?" })
+  end)
 
   it("asks which agent once, leaves this pane out, then remembers", function()
     fake()

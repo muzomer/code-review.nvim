@@ -105,6 +105,7 @@ function M.agents()
         status = a.agent_status or "?",
         cwd = (a.cwd or ""):gsub("^" .. vim.pesc(vim.env.HOME or "\0"), "~"),
         agent = a.agent,
+        session = a.agent_session and a.agent_session.value, -- herdr's guess of its Claude session
       }
     end
   end
@@ -182,32 +183,164 @@ function M.submit(pane_id, text)
   return true
 end
 
----Poke the agent of this review with `text`: the remembered one, else one
----picked now. Without herdr (or with no agent in it) this review's background
----agent (`claude -p`) is used; without both the prompt is copied.
+-- Sessions of herdr panes ------------------------------------------------------
+--
+-- To fork the session of a pane, we need its Claude Code session id and the
+-- directory it was started in. The hook records the id for its pane on every
+-- prompt (exact); herdr's own guess is the fallback. Either is only used when
+-- its transcript is found.
+
+local function claude_dir()
+  local env = vim.env.CLAUDE_CONFIG_DIR
+  return vim.fs.normalize(env and env ~= "" and env or "~/.claude")
+end
+
+---How Claude Code names the directory of a project: every non-alphanumeric
+---character becomes "-".
+function M.project_dir_name(cwd)
+  return (cwd:gsub("[^%w]", "-"))
+end
+
+---Where the hook records the session of each pane.
+function M.sessions_file()
+  return require("code-review.session").state_base() .. "/pane-sessions.json"
+end
+
+local function read_json(path)
+  local f = io.open(path, "r")
+  if not f then
+    return nil
+  end
+  local s = f:read("a")
+  f:close()
+  local ok, data = pcall(vim.json.decode, s)
+  return ok and type(data) == "table" and data or nil
+end
+
+---Record the session a pane runs (called by the hook).
+function M.record_session(pane_id, session_id, transcript)
+  local path = M.sessions_file()
+  local data = read_json(path) or {}
+  data[pane_id] = { session_id = session_id, transcript = transcript, t = os.time() }
+  vim.fn.mkdir(vim.fs.dirname(path), "p")
+  local tmp = path .. ".tmp." .. vim.uv.os_getpid()
+  local f = io.open(tmp, "w")
+  if f then
+    f:write(vim.json.encode(data), "\n")
+    f:close()
+    vim.uv.fs_rename(tmp, path)
+  end
+end
+
+---The directory a session was started in, read from its transcript (the first
+---recorded cwd that matches the transcript's project directory).
+---@return string? cwd
+function M.session_cwd(transcript)
+  local f = io.open(transcript, "r")
+  if not f then
+    return nil
+  end
+  local dir = vim.fs.basename(vim.fs.dirname(transcript))
+  local found
+  for _ = 1, 200 do
+    local line = f:read("l")
+    if not line then
+      break
+    end
+    local cwd = line:match('"cwd":"(.-)"')
+    if cwd and M.project_dir_name(cwd) == dir then
+      found = cwd
+      break
+    end
+  end
+  f:close()
+  return found
+end
+
+---The Claude Code session to fork for a herdr agent.
+---@return { id: string, cwd: string }?
+function M.session_of(target)
+  local candidates = {}
+  local hooked = (read_json(M.sessions_file()) or {})[target.pane_id]
+  if hooked and hooked.session_id then
+    candidates[#candidates + 1] = { id = hooked.session_id, transcript = hooked.transcript }
+  end
+  if target.session then
+    candidates[#candidates + 1] = { id = target.session }
+  end
+  for _, c in ipairs(candidates) do
+    local transcript = c.transcript
+    if not (transcript and vim.uv.fs_stat(transcript)) then
+      transcript = vim.fn.glob(claude_dir() .. "/projects/*/" .. c.id .. ".jsonl", false, true)[1]
+    end
+    local cwd = transcript and M.session_cwd(transcript)
+    if cwd then
+      return { id = c.id, cwd = cwd }
+    end
+  end
+end
+
+-- Sending ------------------------------------------------------------------------
+
+local function nothing_waits()
+  notify("no comment is waiting for the agent")
+end
+
+---Poke the agent of this review: the remembered one, else one picked now.
+---Without herdr (or with no agent in it) this review's background agent
+---(`claude -p`) is used; without both the prompt is copied.
+---
+---A herdr agent is not typed into by default (config.isolate = "fork"): a
+---throwaway fork of its session answers in the background, so your session
+---gets none of the work in its context. When its session cannot be found, the
+---prompt is typed in and asks the agent to use a subagent ("subagent").
 ---@param opts? { pick?: boolean } pick = choose the agent again
-function M.send(root, text, opts)
+function M.send(root, opts)
   opts = opts or {}
+  local prompt = require("code-review.prompt")
   local headless = require("code-review.headless")
-  local mode = require("code-review").config.agent or "auto"
+  local config = require("code-review").config
+  local mode = config.agent or "auto"
+  local isolate = config.isolate
+  if isolate == nil then
+    isolate = "fork"
+  end
+  if not prompt.build(root) then
+    return nothing_waits()
+  end
   local function follow(target, before)
-    if require("code-review").config.progress ~= false then
+    if config.progress ~= false then
       require("code-review.progress").start(root, target, before)
+    end
+  end
+  local function background(text, sent, target, fork)
+    local started, accepted = headless.send(root, text, function()
+      follow(target)
+    end, { fork = fork })
+    if accepted then
+      prompt.mark_sent(root, sent)
+    end
+    if started then
+      notify("poked " .. target.title)
     end
   end
   local function go(target)
     if target.pane_id == M.HEADLESS then
-      local started = headless.send(root, text, function()
-        follow(target)
-      end)
-      if started then
-        notify("poked " .. target.title)
-      end
-      return
+      local text, sent = prompt.build(root, { style = "background" })
+      return background(text, sent, target)
     end
+    if isolate == "fork" and headless.available() then
+      local fork = M.session_of(target)
+      if fork then
+        local text, sent = prompt.build(root, { style = "fork" })
+        return background(text, sent, { pane_id = M.HEADLESS, title = target.title .. " (fork)" }, fork)
+      end
+    end
+    local text, sent = prompt.build(root, { style = isolate and "subagent" or "plain" })
     local before = M.snapshot(target.pane_id) -- taken before submitting, so nothing is missed
     local ok, err = M.submit(target.pane_id, text)
     if ok then
+      prompt.mark_sent(root, sent)
       notify("poked " .. target.title)
       return follow(target, before)
     end
@@ -220,6 +353,7 @@ function M.send(root, text, opts)
     return go(headless_target(root))
   end
   if not M.available() then
+    local text = prompt.build(root, { style = "plain", all = true })
     vim.fn.setreg('"', text)
     pcall(vim.fn.setreg, "+", text)
     return notify("poke needs herdr or claude (neither found here); the prompt is copied, paste it into your agent", vim.log.levels.WARN)
@@ -232,7 +366,7 @@ function M.send(root, text, opts)
     local agents = M.agents() or {}
     for _, a in ipairs(agents) do
       if a.pane_id == saved.pane_id then
-        return go(saved)
+        return go(a) -- the live record: its session may have changed
       end
     end
     notify("the agent you used before is gone; choose another", vim.log.levels.WARN)

@@ -160,12 +160,25 @@ Give your agent the instructions once: copy `skills/nvim-code-review` to
 
 ### Poking the agent
 
-`<leader>cp` (or `<M-s>` when writing a comment) tells an agent to check your
-comments. Which agent:
+`<leader>cp` (or `<M-s>` when writing a comment) tells an agent to answer your
+comments. The prompt carries the comments that changed since the last poke:
+thread id, file and lines, the commented code and your new messages, so the
+agent can answer without listing or reading first. Threads it was already sent
+are only named. It ends with "answer here with one line", because the replies
+are in the threads already. With nothing waiting on the agent, nothing is sent.
 
-- **A Claude Code (or other) session running in [herdr](https://herdr.dev)**:
-  you pick it once per review and it is remembered. The prompt is typed into its
-  pane, so it must be open.
+Which agent:
+
+- **A Claude Code session running in [herdr](https://herdr.dev)**: you pick it
+  once per review and it is remembered. By default (`isolate = "fork"`) it is
+  not typed into: a throwaway fork of its session
+  (`claude -p --resume <id> --fork-session`) answers in the background. The fork
+  knows everything the session knew, and the session's context gets none of the
+  work. The session id comes from the hook (exact, see below) or from herdr,
+  and is used only when its transcript is found. Otherwise the prompt is typed
+  into the pane and asks the agent to work in a subagent (`isolate = "subagent"`),
+  so only a one-line answer lands in its context. `isolate = false` types the
+  plain prompt.
 - **The review's background agent**: `claude -p`, started without a terminal.
   It is used when herdr is not there, when no agent runs in it, or when you pick
   "claude (background)" in the list. The first poke starts a new Claude Code
@@ -173,12 +186,13 @@ comments. Which agent:
   the PR between pokes, even across Neovim restarts. The session id is in
   `.code-review/headless.json` and runs start in the review root (Claude Code
   files sessions by directory). A poke while it works is queued and runs when
-  it finishes. `<leader>cP` shows its output, `:CodeReview chat` opens the same
-  conversation interactively (`claude --resume <id>`).
+  it finishes. `:CodeReview chat` opens the same conversation interactively
+  (`claude --resume <id>`).
 
-By default the background agent may only run the `code-review` CLI and read
-files (`Read`, `Grep`, `Glob`); it cannot change code. Widen that with
-`headless.allowed_tools` / `headless.permission_mode`.
+`<leader>cP` shows the output of a fork or of the background agent. By default
+they may only run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`);
+widen that with `headless.allowed_tools` / `headless.permission_mode`, e.g. to
+let them change code in a local review.
 
 ### Telling Claude Code about new comments automatically
 
@@ -196,7 +210,9 @@ it is on your `PATH`:
 
 On each prompt (~30 ms) it lists threads waiting on the agent that are new, or
 have a new message, since it last told that session, and prints nothing
-otherwise. Per-session state lives in `.code-review/hook-seen.json`.
+otherwise. Per-session state lives in `.code-review/hook-seen.json`. In a herdr
+pane it also records which Claude Code session runs there, so a poke can fork
+exactly that session.
 
 What the agent does with them depends on `NVIM_CODE_REVIEW_HOOK` in the
 environment Claude Code was started with:
@@ -274,6 +290,7 @@ require("code-review").setup({
 
   -- Sending to the agent (see "Poking the agent")
   agent = "auto",               -- "auto" (herdr agent, else background claude), "herdr", "headless"
+  isolate = "fork",             -- herdr agents: "fork" (a throwaway copy answers), "subagent", false
   auto_poke = false,            -- <C-s> also sends to the agent, <M-s> only saves
   open_after_send = true,       -- a new comment sent to the agent opens its thread
   headless = {                  -- the background agent

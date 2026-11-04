@@ -48,6 +48,14 @@ describe("background agent", function()
   local function emit(p, event)
     p.on_line(vim.json.encode(event))
   end
+  ---A project with one comment waiting for the agent.
+  local function project(files)
+    local root = tmp_project(files or { ["f.lua"] = { "a" } })
+    store.update(root, function(d)
+      return store.add_thread(d, { file = "f.lua", start = 1, ["end"] = 1, anchor = { text = { "a" } }, author = "user", body = "why?" })
+    end)
+    return root
+  end
   local function case(name, fn)
     it(name, function()
       fake()
@@ -60,7 +68,7 @@ describe("background agent", function()
   end
 
   case("without herdr a poke starts claude -p with a new session, in the review root", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     ac.poke(root)
     eq(#spawned, 1)
     local p = spawned[1]
@@ -75,7 +83,7 @@ describe("background agent", function()
   end)
 
   case("the next poke resumes the same session", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     ac.poke(root)
     local id = arg_after(spawned[1], "--session-id")
     spawned[1].on_exit(0, "")
@@ -86,7 +94,7 @@ describe("background agent", function()
   end)
 
   case("progress follows the run: working, then done when the process ends", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     ac.poke(root)
     progress.tick()
     assert(progress.statusline():find("working"), progress.statusline())
@@ -104,7 +112,7 @@ describe("background agent", function()
   end)
 
   case("a failed run is reported", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     ac.poke(root)
     spawned[1].on_exit(1, "boom")
     progress.tick()
@@ -113,7 +121,7 @@ describe("background agent", function()
   end)
 
   case("a poke while it works is queued and runs when the agent is done", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     ac.poke(root)
     ac.poke(root)
     eq(#spawned, 1)
@@ -123,7 +131,7 @@ describe("background agent", function()
   end)
 
   case("a lost session starts a new one", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     ac.poke(root)
     local first = arg_after(spawned[1], "--session-id")
     spawned[1].on_exit(0, "")
@@ -136,7 +144,7 @@ describe("background agent", function()
   end)
 
   case("with herdr agents running, the picker offers the background agent too", function()
-    local root = tmp_project({ ["f.lua"] = { "a" } })
+    local root = project()
     poke.available = function() return true end
     poke.run = function(args)
       return { code = 0, stdout = vim.json.encode({ result = { agents = {

@@ -84,16 +84,14 @@ end
 
 M.DEFAULT_TOOLS = { "Bash(code-review:*)", "Read", "Grep", "Glob" }
 
-M.BACKGROUND_NOTE = [[
-
-You run in the background: nobody watches this terminal, so do not ask questions here. Put everything you want to say in the review threads.]]
-
 ---Command line of a run. `resume` = id of the session to continue, else `new_id`
----starts a new one.
+---starts a new one; `fork` = id of a session to copy (the copy is thrown away).
 function M.args(root, text, opts)
   local c = cfg()
-  local args = { M.command(), "-p", text .. M.BACKGROUND_NOTE, "--output-format", "stream-json", "--verbose" }
-  if opts.resume then
+  local args = { M.command(), "-p", text, "--output-format", "stream-json", "--verbose" }
+  if opts.fork then
+    vim.list_extend(args, { "--resume", opts.fork, "--fork-session" })
+  elseif opts.resume then
     vim.list_extend(args, { "--resume", opts.resume })
   else
     vim.list_extend(args, { "--session-id", opts.new_id })
@@ -219,9 +217,10 @@ function M.busy_policy(run)
 end
 
 ---@param on_start? fun() called each time a run starts (also a queued one)
-start = function(root, text, on_start, retried)
-  local saved = M.session_id(root)
-  local new_id = not saved and M.uuid() or nil
+---@param fork? { id: string, cwd: string } run a throwaway copy of this session instead
+start = function(root, text, on_start, retried, fork)
+  local saved = not fork and M.session_id(root) or nil
+  local new_id = not fork and not saved and M.uuid() or nil
   if new_id then
     save_session_id(root, new_id) -- before the run, so a second poke resumes it
   end
@@ -233,11 +232,14 @@ start = function(root, text, on_start, retried)
     seq = (prev and prev.seq or 0) + 1,
     text = text,
     on_start = on_start,
+    fork = fork,
   }
   runs[root] = run
-  push(run, { string.format("● %s %s", saved and "resuming session" or "new session", saved or new_id) })
-  local args = M.args(root, text, { resume = saved, new_id = new_id })
-  run.handle = M.spawn(args, root, function(line)
+  push(run, { fork and ("● fork of session " .. fork.id)
+    or string.format("● %s %s", saved and "resuming session" or "new session", saved or new_id) })
+  local args = M.args(root, text, { resume = saved, new_id = new_id, fork = fork and fork.id })
+  -- a fork must start where its session was started: Claude Code files sessions by directory
+  run.handle = M.spawn(args, fork and fork.cwd or root, function(line)
     local ok, event = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
     if not ok or type(event) ~= "table" then
       return push(run, { line })
@@ -270,7 +272,7 @@ start = function(root, text, on_start, retried)
     end
     local q = run.queued
     if q then
-      start(root, q.text, q.on_start)
+      start(root, q.text, q.on_start, nil, q.fork)
     end
   end)
   if on_start then
@@ -281,30 +283,33 @@ end
 
 ---Send `text` to this review's background agent, starting or resuming it.
 ---@param on_start? fun() called when a run starts (now, or later for a queued poke)
+---@param opts? { fork?: { id: string, cwd: string } } run a throwaway fork of that session
 ---@return boolean started false when the poke was queued or ignored
-function M.send(root, text, on_start)
+---@return boolean accepted false when nothing will deliver it (ignored, or a chat is open)
+function M.send(root, text, on_start, opts)
+  opts = opts or {}
   if chats[root] then
     vim.fn.setreg('"', text)
     pcall(vim.fn.setreg, "+", text)
     notify("the review agent is open in :CodeReview chat; the prompt is copied, paste it there", vim.log.levels.WARN)
-    return false
+    return false, false
   end
   local run = runs[root]
   if run and run.status == "working" then
     local policy = M.busy_policy(run)
     if policy == "queue" then
-      run.queued = { text = text, on_start = on_start }
+      run.queued = { text = text, on_start = on_start, fork = opts.fork }
       notify("the agent is still working; it will check your comments again when it is done")
-      return false
+      return false, true
     elseif policy == "ignore" then
       notify("the agent is still working on your comments")
-      return false
+      return false, false
     end
     runs[root] = nil -- restart: the exit handler of the old run sees it was replaced
     run.handle.kill()
   end
-  start(root, text, on_start)
-  return true
+  start(root, text, on_start, nil, opts.fork)
+  return true, true
 end
 
 ---Stop the background agent of this review (the session is kept).
