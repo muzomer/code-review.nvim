@@ -165,23 +165,26 @@ function M.reanchor_threads(threads, lines)
   return changed
 end
 
----Re-anchor every thread in the project against files on disk.
+---Re-anchor every thread in the project against the text it was written on:
+---files on disk, or the base/head snapshots for threads of a diff or PR.
 function M.reanchor_root(root)
   local store = require("code-review.store")
+  local session = require("code-review.session")
   if not store.exists(root) then
     return
   end
   store.update(root, function(data)
-    local by_file = {}
+    -- Threads sharing a file, side and base see the same text.
+    local groups = {}
     for _, t in ipairs(data.threads) do
-      by_file[t.file] = by_file[t.file] or {}
-      table.insert(by_file[t.file], t)
+      local key = table.concat({ t.file, t.side or "new", t.base or "" }, "\0")
+      groups[key] = groups[key] or { threads = {}, t = t }
+      table.insert(groups[key].threads, t)
     end
     local changed = false
-    for file, threads in pairs(by_file) do
-      local path = root .. "/" .. file
-      local lines = vim.fn.filereadable(path) == 1 and vim.fn.readfile(path) or nil
-      changed = M.reanchor_threads(threads, lines) or changed
+    for _, g in pairs(groups) do
+      local lines = session.lines(root, g.t.file, { side = g.t.side, base = g.t.base })
+      changed = M.reanchor_threads(g.threads, lines) or changed
     end
     if not changed then
       return store.UNCHANGED

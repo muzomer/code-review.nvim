@@ -52,3 +52,25 @@ first.
 - You cannot edit, reopen, or delete threads. Those are the user's.
 - `code-review show <id>` prints one thread; `code-review list --all`
   includes resolved ones.
+
+## Reviewing a PR (no checkout)
+
+When the user reviews a GitHub PR in Neovim there is no local checkout: the
+changed files are snapshots in a cache directory. Add `--pr <PR URL | owner/repo#n>`
+to **every** command (or run with `NVIM_CODE_REVIEW_PR` set), e.g.
+`code-review --pr acme/api#12 list --needs agent`.
+
+- `code-review --pr REF diff` starts with the PR **description** (read it first: it says what
+  the change is meant to do), then lists the changed files with `old:` (base commit)
+  and `new:` (head commit) snapshot paths. **Read code from those paths** with
+  your normal file tools; `--json` gives the same data.
+- A file that is not in the snapshot (a caller, a helper, config) is fetched on
+  demand: `code-review --pr REF file src/utils.py` prints a path you can read.
+  `--side old` fetches the base-commit version. `code-review --pr REF ls src/`
+  lists a directory at the PR head. You cannot grep the whole repository; say so
+  when a question needs it.
+- Threads on removed or changed code may be on the **old side** (shown as
+  `(OLD side @abc1234)`): their line numbers refer to the base-commit snapshot.
+  To open one yourself: `code-review --pr REF add <old path> 12 "..." --side old`.
+- You cannot change the PR. Where a thread asks for a fix, reply with the
+  explanation and a short suggested snippet; never claim you edited the PR.

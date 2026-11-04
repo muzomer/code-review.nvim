@@ -2,4 +2,10 @@
 # Agent-facing CLI for code-review.nvim. Requires Neovim >= 0.10 on PATH.
 self=$(readlink -f "$0" 2>/dev/null || echo "$0")
 dir=$(cd "$(dirname "$self")" && pwd)
+# `code-review pr <PR URL | owner/repo#n>` opens an interactive Neovim (with your
+# config) in review mode, from any directory.
+if [ "$1" = "pr" ] && [ -n "$2" ]; then
+  exec "${NVIM_CODE_REVIEW_NVIM:-nvim}" "+CodeReview pr $2"
+fi
 exec "${NVIM_CODE_REVIEW_NVIM:-nvim}" --clean -l "$dir/code-review.lua" "$@"
+

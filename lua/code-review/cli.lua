@@ -1,6 +1,8 @@
 -- Agent-facing CLI. Run via bin/code-review (`nvim --clean -l`).
 local store = require("code-review.store")
 local anchor = require("code-review.anchor")
+local session = require("code-review.session")
+local github = require("code-review.github")
 
 local M = {}
 
@@ -12,13 +14,19 @@ Usage:
   code-review show <id> [--json]
   code-review reply <id> <body | -> [--author NAME]
   code-review resolve <id> [body | -] [--author NAME]
-  code-review add <file> <start> [end] <body | -> [--author NAME]
+  code-review add <file> <start> [end] <body | -> [--author NAME] [--side old|new]
+  code-review fetch <PR URL | owner/repo#n>   download a PR (no checkout needed)
+  code-review diff [--json]                   PR review: changed files and snapshot paths
+  code-review file <path> [--side old|new]    PR review: print a file's snapshot path (fetches it if needed)
+  code-review ls [dir]                        PR review: list a directory of the PR head
   code-review skill        print agent instructions
   code-review hook         Claude Code hook: report new threads (JSON on stdin)
 
 `list` shows unresolved threads by default. A body of "-" is read from stdin.
 --author defaults to "agent". Agents cannot edit, reopen or delete threads.
-Options: --root DIR (default: $NVIM_CODE_REVIEW_ROOT or the git/jj root of cwd)]]
+Options: --root DIR (default: $NVIM_CODE_REVIEW_ROOT or the git/jj root of cwd)
+         --pr REF  review a PR opened with `:CodeReview pr REF` instead of a project
+Needs a GitHub token for PRs: $GH_TOKEN, $GITHUB_TOKEN, or `gh auth login`.]]
 
 local BOOL = { json = true, all = true, help = true, ["no-reanchor"] = true }
 
@@ -75,14 +83,18 @@ end
 local function format_thread(t)
   local r = t.range
   local loc = r.start == r["end"] and tostring(r.start) or (r.start .. "-" .. r["end"])
+  local where = t.file
+  if t.side == "old" then
+    where = where .. " (OLD side" .. (t.base and (" @" .. t.base:sub(1, 7)) or "") .. ")"
+  end
   local lines = {
-    string.format("%s  [%s, needs %s]  %s:%s", t.id, t.status, t.needs, t.file, loc),
+    string.format("%s  [%s, needs %s]  %s:%s", t.id, t.status, t.needs, where, loc),
   }
   for i, l in ipairs((t.anchor or {}).text or {}) do
     lines[#lines + 1] = string.format("  %5d | %s", r.start + i - 1, l)
   end
   for _, m in ipairs(t.messages) do
-    lines[#lines + 1] = string.format("  - %s (%s) %s:", m.id, m.author, m.ts)
+    lines[#lines + 1] = string.format("  - %s (%s) %s%s:", m.id, m.author, m.ts, m.edited and (" [edited " .. m.edited .. "]") or "")
     lines[#lines + 1] = indent(m.body, "      ")
   end
   return table.concat(lines, "\n")
@@ -114,6 +126,16 @@ local function with_thread(root, id, fn)
     end
     return fn(t, data)
   end)
+end
+
+---Repo-relative path for `file` in a PR review: accepts a repo path or one of
+---the snapshot paths printed by `code-review diff`.
+local function pr_rel(root, file)
+  local sroot, sfile = session.infer(vim.fn.fnamemodify(file, ":p"))
+  if sroot == root then
+    return sfile
+  end
+  return (file:gsub("^%./", ""):gsub("^/+", ""))
 end
 
 local cmds = {}
@@ -202,17 +224,38 @@ function cmds.add(root, pos, flags)
   if not body then
     error("comment body is empty", 0)
   end
-  local rel, abs = to_rel(root, file)
-  if vim.fn.filereadable(abs) == 0 then
-    error("cannot read " .. abs, 0)
+  local pr = session.load(root)
+  local rel, lines, side, base
+  if pr and pr.kind == "pr" then
+    side = flags.side == "old" and "old" or nil
+    if flags.side and flags.side ~= "old" and flags.side ~= "new" then
+      error("--side must be old or new", 0)
+    end
+    rel = pr_rel(root, file)
+    if not session.lines(root, rel, { side = side }) then
+      local path, err = github.ensure_file(root, rel, side)
+      if not path then
+        error(err, 0)
+      end
+    end
+    lines = session.lines(root, rel, { side = side })
+    base = side == "old" and pr.base_sha or nil
+  else
+    local abs
+    rel, abs = to_rel(root, file)
+    if vim.fn.filereadable(abs) == 0 then
+      error("cannot read " .. abs, 0)
+    end
+    lines = vim.fn.readfile(abs)
   end
-  local lines = vim.fn.readfile(abs)
   if s < 1 or e < s or e > #lines then
     error(string.format("line range %d-%d is outside %s (%d lines)", s, e, rel, #lines), 0)
   end
   local id = store.update(root, function(data)
     return store.add_thread(data, {
       file = rel,
+      side = side,
+      base = base,
       start = s,
       ["end"] = e,
       anchor = anchor.capture(lines, s, e),
@@ -221,6 +264,107 @@ function cmds.add(root, pos, flags)
     })
   end)
   emit(flags, { id = id }, "Created " .. id)
+end
+
+-- PR reviews --------------------------------------------------------------------
+
+local function need_pr(root)
+  local s = session.load(root)
+  if not s or s.kind ~= "pr" then
+    error("not a PR review: pass --pr <PR URL | owner/repo#n> (open it first with `:CodeReview pr` or `code-review fetch`)", 0)
+  end
+  return s
+end
+
+function cmds.fetch(root, pos, flags)
+  local ref, err = github.parse_ref(pos[1] or "")
+  if not ref then
+    error(err, 0)
+  end
+  local r, ferr = github.open_pr(ref)
+  if not r then
+    error(ferr, 0)
+  end
+  local s = session.load(r)
+  emit(flags, { root = r, files = #s.files }, string.format("Fetched %s/%s#%d: %d changed files. Use --pr %s/%s#%d", ref.owner, ref.repo, ref.number, #s.files, ref.owner, ref.repo, ref.number))
+end
+
+function cmds.diff(root, pos, flags)
+  local s = need_pr(root)
+  local files, viewed = {}, session.viewed_map(root)
+  for _, f in ipairs(s.files) do
+    files[#files + 1] = {
+      path = f.path,
+      viewed = viewed[f.path] or false,
+      old_path = f.old_path,
+      status = f.status,
+      additions = f.additions,
+      deletions = f.deletions,
+      old = f.status ~= "added" and session.snapshot_path(root, f.path, "old") or nil,
+      new = f.status ~= "removed" and session.snapshot_path(root, f.path, "new") or nil,
+    }
+  end
+  local value = {
+    pr = string.format("%s/%s#%d", s.owner, s.repo, s.number),
+    title = s.title,
+    url = s.url,
+    author = s.author,
+    state = s.state,
+    draft = s.draft,
+    labels = s.labels,
+    description = s.body or "",
+    base = { ref = s.base_ref, sha = s.base_sha },
+    head = { ref = s.head_ref, sha = s.head_sha },
+    files = files,
+  }
+  local lines = {
+    string.format("PR %s: %s", value.pr, s.title or ""),
+    string.format("base %s @%s -> head %s @%s", s.base_ref, (s.base_sha or ""):sub(1, 7), s.head_ref, (s.head_sha or ""):sub(1, 7)),
+    "",
+    "Description" .. (s.author and (" (by @" .. s.author .. ")") or "") .. ":",
+    indent(vim.trim(s.body or "") ~= "" and vim.trim(s.body) or "(none)", "  "),
+    "",
+  }
+  for _, f in ipairs(files) do
+    lines[#lines + 1] = string.format("%-9s +%-4d -%-4d %s%s", f.status, f.additions or 0, f.deletions or 0, f.path, f.viewed and "   [viewed by the user]" or "")
+    if f.old then
+      lines[#lines + 1] = "    old: " .. f.old
+    end
+    if f.new then
+      lines[#lines + 1] = "    new: " .. f.new
+    end
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Other files: code-review --pr <ref> file <path>; comment on removed code with --side old."
+  emit(flags, value, table.concat(lines, "\n"))
+end
+
+function cmds.file(root, pos, flags)
+  need_pr(root)
+  local path = pos[1]
+  if not path then
+    error("usage: code-review file <path> [--side old|new]", 0)
+  end
+  local side = flags.side == "old" and "old" or nil
+  local abs, err = github.ensure_file(root, pr_rel(root, path), side)
+  if not abs then
+    error(err, 0)
+  end
+  emit(flags, { path = abs }, abs)
+end
+
+function cmds.ls(root, pos, flags)
+  local s = need_pr(root)
+  local entries, err = github.list_dir(s, pos[1] or "", s.head_sha)
+  if not entries then
+    error(err, 0)
+  end
+  local names = {}
+  for _, e in ipairs(entries) do
+    names[#names + 1] = e.type == "dir" and (e.name .. "/") or e.name
+  end
+  table.sort(names)
+  emit(flags, names, table.concat(names, "\n"))
 end
 
 function cmds.skill()
@@ -270,6 +414,15 @@ local function hook(root)
   if input.cwd then
     root = store.find_root(input.cwd)
   end
+  -- A PR review has no checkout to find a root from: name it in the environment
+  -- (NVIM_CODE_REVIEW_PR=owner/repo#n claude).
+  local pr_ref = os.getenv("NVIM_CODE_REVIEW_PR")
+  if pr_ref and pr_ref ~= "" then
+    local ref = github.parse_ref(pr_ref)
+    if ref then
+      root = session.dirs(ref)
+    end
+  end
   if not store.exists(root) then
     return
   end
@@ -293,10 +446,16 @@ local function hook(root)
   local session = input.session_id or "default"
   local seen = (state[session] or {}).seen or {}
 
+  -- A thread is "new" to a session when it has more messages than last time or
+  -- its last message was edited since. (Unedited threads keep the plain count.)
+  local function signature(t)
+    local last = t.messages[#t.messages]
+    return last.edited and (#t.messages .. ":" .. last.edited) or #t.messages
+  end
   local new, now_seen = {}, {}
   for _, t in ipairs(pending) do
-    now_seen[t.id] = #t.messages
-    if seen[t.id] ~= #t.messages then
+    now_seen[t.id] = signature(t)
+    if seen[t.id] ~= signature(t) then
       new[#new + 1] = t
     end
   end
@@ -326,11 +485,14 @@ local function hook(root)
       break
     end
     local last = t.messages[#t.messages]
-    local text = last.body:gsub("%s+", " ")
+    local text = (last.edited and "(edited) " or "") .. last.body:gsub("%s+", " ")
     if #text > 100 then
       text = text:sub(1, 97) .. "..."
     end
     lines[#lines + 1] = string.format("- %s %s:%d: %s", t.id, t.file, t.range.start, text)
+  end
+  if pr_ref and pr_ref ~= "" then
+    lines[#lines + 1] = string.format("This is a PR review without a checkout: run every command as `code-review --pr %s <command>`.", pr_ref)
   end
   lines[#lines + 1] = HOOK_INSTRUCTIONS[mode]
   out(table.concat(lines, "\n"))
@@ -358,7 +520,19 @@ function M.run(argv)
     return 1
   end
   local root = flags.root and vim.fs.normalize(vim.fn.fnamemodify(flags.root, ":p")):gsub("/$", "")
-    or store.find_root()
+  if flags.pr then
+    local ref, perr = github.parse_ref(flags.pr)
+    if not ref then
+      io.stderr:write("code-review: " .. perr .. "\n")
+      return 1
+    end
+    root = session.dirs(ref)
+    if cmd ~= "fetch" and not session.load(root) then
+      io.stderr:write(string.format("code-review: PR %s/%s#%d is not fetched yet; run `code-review fetch %s` or open it in Neovim\n", ref.owner, ref.repo, ref.number, flags.pr))
+      return 1
+    end
+  end
+  root = root or store.find_root()
   local ok, err = pcall(fn, root, pos, flags)
   if not ok then
     io.stderr:write("code-review: " .. tostring(err) .. "\n")

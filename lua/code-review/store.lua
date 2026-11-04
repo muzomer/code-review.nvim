@@ -69,8 +69,8 @@ end
 
 local ORDER = {
   "version", "threads",
-  "id", "file", "range", "start", "end", "status", "needs", "anchor",
-  "text", "context_before", "context_after", "messages", "author", "ts", "body",
+  "id", "file", "side", "base", "range", "start", "end", "status", "needs", "anchor",
+  "text", "context_before", "context_after", "messages", "author", "ts", "edited", "body",
 }
 local RANK = {}
 for i, k in ipairs(ORDER) do
@@ -243,11 +243,33 @@ function M.add_message(t, author, body)
   return msg
 end
 
----@param o {file:string, start:integer, ["end"]:integer, anchor:table, author:string, body:string}
+---`side`/`base` are optional: a missing `side` means "new" (the file as it is
+---on disk) and a missing `base` means the working tree. A thread on the old
+---side of a diff carries `side = "old"` and the ref its text comes from.
+---Replace the text of the thread's last message when it is the user's, i.e. the
+---agent has not answered it yet. Marks it `edited` (agents and the hook see that).
+---@return boolean ok
+---@return string? err why not
+function M.edit_last_user_message(t, body)
+  local last = t.messages[#t.messages]
+  if not last or last.author ~= "user" then
+    return false, "the agent has already replied; reply instead"
+  end
+  if last.body == body then
+    return true
+  end
+  last.body = body
+  last.edited = M.now()
+  return true
+end
+
+---@param o {file:string, side?:"old"|"new", base?:string, start:integer, ["end"]:integer, anchor:table, author:string, body:string}
 function M.add_thread(data, o)
   local t = {
     id = new_id(data),
     file = o.file,
+    side = o.side ~= "new" and o.side or nil,
+    base = o.base,
     range = { start = o.start, ["end"] = o["end"] },
     anchor = o.anchor,
     status = "open",

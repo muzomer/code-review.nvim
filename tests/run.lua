@@ -4,6 +4,11 @@ package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.pa
 vim.opt.runtimepath:prepend(root)
 _G.PLUGIN_ROOT = root
 
+-- PR sessions of tests live in a throwaway directory, never in the real cache.
+local sandbox = vim.fn.tempname()
+vim.env.NVIM_CODE_REVIEW_STATE = sandbox .. "/state"
+vim.env.NVIM_CODE_REVIEW_CACHE = sandbox .. "/cache"
+
 local passed, failed, prefix = 0, 0, ""
 
 function _G.describe(name, fn)
