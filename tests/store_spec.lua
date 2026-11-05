@@ -120,4 +120,21 @@ describe("store", function()
     pcall(store.update, root, function() error("boom") end)
     eq(vim.uv.fs_stat(lock), nil)
   end)
+
+  it("a pid from another PID namespace (a sandboxed agent) is not taken for gone", function()
+    local root = tmp_project()
+    store.ensure_dir(root)
+    local _, _, lock = store.paths(root)
+    local dead = vim.system({ "true" })
+    dead:wait()
+    vim.fn.writefile({ dead.pid .. " pid:[1]" }, lock) -- no such process here, but it may run there
+    vim.uv.fs_utime(lock, os.time() - 2, os.time() - 2)
+    local saved = store.lock_timeout_ms
+    store.lock_timeout_ms = 100
+    local ok, err = pcall(add, root, "user", "q")
+    store.lock_timeout_ms = saved
+    assert(not ok and tostring(err):find("timed out", 1, true), tostring(err))
+    assert(vim.uv.fs_stat(lock), "the lock is kept")
+    vim.uv.fs_unlink(lock)
+  end)
 end)

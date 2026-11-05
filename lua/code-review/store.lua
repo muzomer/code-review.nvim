@@ -190,18 +190,23 @@ local function write(root, data)
   end
 end
 
-local LOCK_TIMEOUT_MS = 5000
+M.lock_timeout_ms = 5000 -- how long an update waits for the lock
 local LOCK_STALE_S = 10 -- a lock with no pid in it
 local LOCK_ABANDONED_S = 60 -- a lock whose process is still there
 
+-- The PID namespace of this process (Linux): a pid from another one (an agent
+-- in a sandbox or container) says nothing about which processes exist here.
+local PID_NS = uv.fs_readlink("/proc/self/ns/pid") or ""
+
+---The pid that holds the lock, and its PID namespace ("" when unknown).
 local function lock_owner(lock)
   local f = io.open(lock, "r")
   if not f then
     return nil
   end
-  local pid = tonumber(f:read("a") or "")
+  local pid, ns = (f:read("a") or ""):match("^%s*(%d+)%s*(%S*)")
   f:close()
-  return pid
+  return tonumber(pid), ns or ""
 end
 
 ---Whether the lock was left behind: its process is gone, or it is far older
@@ -212,8 +217,10 @@ local function stale(lock)
     return false
   end
   local age = os.time() - st.mtime.sec
-  local pid = lock_owner(lock)
-  if pid and age >= 1 then -- give a new lock a moment to get its pid written
+  local pid, ns = lock_owner(lock)
+  -- give a new lock a moment to get its pid written; a pid of another namespace
+  -- (or a lock without one, from an older version) only goes stale by age
+  if pid and age >= 1 and (ns == "" or ns == PID_NS) then
     local alive, _, name = uv.kill(pid, 0)
     if not alive and name == "ESRCH" then
       return true
@@ -223,11 +230,11 @@ local function stale(lock)
 end
 
 local function acquire(lock)
-  local deadline = uv.hrtime() + LOCK_TIMEOUT_MS * 1e6
+  local deadline = uv.hrtime() + M.lock_timeout_ms * 1e6
   while true do
     local fd, err, name = uv.fs_open(lock, "wx", 420)
     if fd then
-      uv.fs_write(fd, tostring(uv.os_getpid()))
+      uv.fs_write(fd, uv.os_getpid() .. " " .. PID_NS)
       uv.fs_close(fd)
       return
     end
@@ -246,7 +253,8 @@ end
 
 ---Remove the lock if it is still ours (it may have been taken over).
 local function release(lock)
-  if lock_owner(lock) == uv.os_getpid() then
+  local pid, ns = lock_owner(lock)
+  if pid == uv.os_getpid() and ns == PID_NS then
     uv.fs_unlink(lock)
   end
 end
