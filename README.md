@@ -189,8 +189,9 @@ the agent runs:
 
 `<leader>cP` shows the output of a fork or of the background agent. By default
 Claude may run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`),
-and in a local review also change them (`Edit`, `Write`) — only inside its
-directory and the reviewed project (a fork gets the project with `--add-dir`).
+and in a local review also change them (`Edit`, `Write`) — only inside the
+reviewed project (`Edit(//<project>/**)`), never in the directory a fork
+started in (a fork gets the project with `--add-dir`).
 A PR review stays read-only. Set `headless.allowed_tools` (it replaces the whole
 list) or `headless.permission_mode` to choose differently.
 
@@ -286,7 +287,7 @@ require("code-review").setup({
   headless = {                  -- the background agent
     agent = "claude",           -- "claude", "codex", "opencode", "gemini"
     cmd = nil,                  -- executable (default: the agent's own)
-    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit", "Write" in a local review)
+    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit(//<project>/**)" in a local review)
     permission_mode = nil,      -- claude --permission-mode, codex --sandbox, gemini --approval-mode,
                                 -- opencode "auto" (--auto)
     args = {},                  -- extra arguments for every run
@@ -295,7 +296,7 @@ require("code-review").setup({
   progress_float = true,        -- true: floating window, false: winbar / statusline only,
                                 -- "auto": the PR review's winbar during a review, else the float
   progress_output = false,      -- also open the live output window on each poke
-  add_bin_to_path = true,       -- put bin/ on $PATH so agents started inside Neovim find the CLI
+  add_bin_to_path = true,       -- put bin/ on $PATH so agents started inside Neovim (and background runs) find the CLI
 
   -- PR reviews
   diff_layout = "split",        -- "split" (side by side) or "unified" (one column)

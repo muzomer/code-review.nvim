@@ -92,7 +92,7 @@ M.config = {
   headless = { -- the background agent: one resumable conversation per review
     agent = "claude", -- "claude", "codex", "opencode" or "gemini"
     cmd = nil, -- its executable (default: the agent's own: claude, codex, opencode, gemini)
-    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob, plus Edit/Write in a local review (not a PR)
+    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob, plus Edit/Write inside the project in a local review (not a PR)
     permission_mode = nil, -- claude: --permission-mode (e.g. "acceptEdits"); codex: --sandbox (default "workspace-write");
     -- gemini: --approval-mode (e.g. "yolo" to let it run the CLI); opencode: "auto" = --auto
     args = {}, -- extra arguments for every run
@@ -2397,11 +2397,7 @@ function M.setup(opts)
   end
 
   if M.config.add_bin_to_path then
-    local here = debug.getinfo(1, "S").source:sub(2)
-    local bin = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(here))) .. "/bin"
-    if not (vim.env.PATH or ""):find(bin, 1, true) then
-      vim.env.PATH = bin .. ":" .. (vim.env.PATH or "")
-    end
+    vim.env.PATH = require("code-review.agents").path_with_bin(vim.env.PATH)
   end
 
   for _, buf in ipairs(api.nvim_list_bufs()) do

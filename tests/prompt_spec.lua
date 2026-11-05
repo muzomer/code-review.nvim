@@ -180,8 +180,9 @@ describe("poke: keeping the agent's session small", function()
     assert(vim.tbl_contains(spawned[1].args, "--fork-session"))
     eq(spawned[1].cwd, "/work/started-here") -- where the session was started, not where the pane is now
     eq(spawned[1].env, { NVIM_CODE_REVIEW_ROOT = root }) -- the CLI still finds this project's comments
-    -- it may change the code the comments are about, in the reviewed project
-    assert(vim.tbl_contains(spawned[1].args, "Edit") and vim.tbl_contains(spawned[1].args, "Write"), vim.inspect(spawned[1].args))
+    -- it may change the code the comments are about, in the reviewed project only (not where it started)
+    assert(vim.tbl_contains(spawned[1].args, "Edit(/" .. vim.fs.normalize(root) .. "/**)"), vim.inspect(spawned[1].args))
+    assert(not vim.tbl_contains(spawned[1].args, "Edit") and not vim.tbl_contains(spawned[1].args, "Write"), vim.inspect(spawned[1].args))
     eq(arg_after(spawned[1].args, "--add-dir"), root)
     assert(spawned[1].args[3]:find("--root " .. root, 1, true), spawned[1].args[3])
     assert(spawned[1].args[3]:find("temporary copy", 1, true), spawned[1].args[3])

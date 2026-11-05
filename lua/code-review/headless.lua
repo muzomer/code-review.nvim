@@ -120,7 +120,7 @@ function M.args(root, text, opts)
   local args = a.args({
     cmd = M.command(opts.agent), prompt = text, cwd = cwd, dirs = dirs, cfg = cfg(),
     new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
-    edit = not pr, -- a local review asks for code changes; a PR has no checkout to change
+    edit = not pr and root or nil, -- a local review asks for code changes; a PR has no checkout to change
   })
   vim.list_extend(args, cfg().args or {})
   return args
@@ -175,7 +175,10 @@ M.spawn = function(args, cwd, on_line, on_exit, env)
   local pending = ""
   local h = vim.system(args, {
     cwd = cwd,
-    env = vim.tbl_extend("force", env or {}, { PATH = agents.BIN .. ":" .. (vim.env.PATH or "") }), -- `code-review` always resolves
+    -- `code-review` resolves even before setup() put it on PATH (unless the user opted out)
+    env = require("code-review").config.add_bin_to_path ~= false
+        and vim.tbl_extend("force", env or {}, { PATH = agents.path_with_bin(vim.env.PATH) })
+      or env,
     text = true,
     stdin = "",
     stdout = function(_, data)
@@ -290,7 +293,7 @@ start = function(root, text, on_start, retried, fork)
     local r = run.result
     if signal and signal ~= 0 and not (r and r.done) then
       code = code ~= 0 and code or 128 + signal -- killed (OOM, pkill): not "done"
-      stderr = (stderr ~= "" and stderr or "") .. " killed by signal " .. signal
+      stderr = vim.trim(stderr .. " killed by signal " .. signal)
     end
     if code == 0 and not (r and r.error) then
       run.status = "done"
@@ -306,6 +309,8 @@ start = function(root, text, on_start, retried, fork)
         local again = start(root, text, on_start, true)
         if again then
           again.queued = run.queued -- a poke that waited for this run still waits
+        elseif run.queued then -- the retry could not start (already reported): try the queued poke
+          start(root, run.queued.text, run.queued.on_start, nil, run.queued.fork)
         end
         return
       end

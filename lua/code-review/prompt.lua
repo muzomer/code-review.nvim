@@ -78,7 +78,7 @@ end
 -- Runs without a terminal cannot ask for permission: steer them to the one
 -- form of the command they are allowed to run.
 local NOBODY_APPROVES = " Run `code-review` exactly as written here: it is on your PATH and allowed;"
-  .. " other forms (a full path, `export PATH=...;` or `cd ...;` in front) need an approval nobody can give here."
+  .. " other forms (`export PATH=...;` or `cd ...;` in front) need an approval nobody can give here."
 
 -- How the agent should work, by where it runs.
 M.STYLE = {

@@ -90,11 +90,15 @@ describe("background agent", function()
   case("a PR review stays read-only; a local one may edit", function()
     local root = project()
     local args = headless.args(root, "x", { new_id = "id" })
-    assert(vim.tbl_contains(args, "Edit"), vim.inspect(args))
+    -- only inside the project (`//` = absolute); an Edit rule covers Write, a bare Write would allow any path
+    assert(vim.tbl_contains(args, "Edit(/" .. vim.fs.normalize(root) .. "/**)"), vim.inspect(args))
+    assert(not vim.tbl_contains(args, "Edit") and not vim.tbl_contains(args, "Write"), vim.inspect(args))
     eq(arg_after({ args = args }, "--add-dir"), nil) -- it runs in the project already
     require("code-review.session").save(root, { kind = "pr", owner = "o", repo = "r", number = 1, files = {}, cache = root .. "/c" })
     args = headless.args(root, "x", { new_id = "id" })
-    assert(not vim.tbl_contains(args, "Edit") and not vim.tbl_contains(args, "Write"), vim.inspect(args))
+    for _, a in ipairs(args) do
+      assert(not a:find("^Edit") and not a:find("^Write"), vim.inspect(args))
+    end
   end)
 
   case("the next poke resumes the same session", function()
@@ -178,6 +182,27 @@ describe("background agent", function()
     eq(#spawned, 3) -- the retry in a new session
     spawned[3].on_exit(0, "")
     eq(#spawned, 4) -- then the queued poke
+  end)
+
+  case("a queued poke still runs when the retry in a new session cannot start", function()
+    local root = project()
+    ac.poke(root)
+    spawned[1].on_exit(0, "")
+    ac.poke(root) -- resumes the session
+    ac.poke(root) -- queued
+    local spawn, tries = headless.spawn, 0
+    headless.spawn = function(...)
+      tries = tries + 1
+      if tries == 1 then
+        error("ENOENT: claude") -- the retry fails to start
+      end
+      return spawn(...)
+    end
+    spawned[2].on_exit(1, "No conversation found with session ID: x")
+    headless.spawn = spawn
+    eq(tries, 2) -- the retry, then the queued poke
+    eq(#spawned, 3)
+    eq(headless.status(root).status, "working")
   end)
 
   case("a failed run is reported even when progress is off", function()

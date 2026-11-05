@@ -10,7 +10,7 @@
 --   fork       a session can be copied, so a poke can answer from a fork of it
 --   subagents  the agent can hand work to a subagent (prompt wording)
 --   args(o)    the command line; o = { cmd, prompt, cwd, new_id?, resume?, fork?, dirs, cfg, edit? }
---              (edit: a local review, where the agent should change the code)
+--              (edit: the project of a local review, where the agent may change the code)
 --   parse(ev)  one decoded JSON line -> { lines?, append?, session_id?, done?, error?, cost? }
 --   chat(id)   command line of an interactive terminal on that session
 --
@@ -46,6 +46,15 @@ end
 local here = debug.getinfo(1, "S").source:sub(2)
 M.BIN = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(vim.fn.fnamemodify(here, ":p"))))) .. "/bin"
 
+---$PATH with M.BIN in front, unless it is on it already.
+function M.path_with_bin(path)
+  path = path or ""
+  if vim.tbl_contains(vim.split(path, ":", { plain = true }), M.BIN) then
+    return path
+  end
+  return path == "" and M.BIN or (M.BIN .. ":" .. path)
+end
+
 M.claude = {
   name = "Claude Code",
   cmd = "claude",
@@ -53,7 +62,6 @@ M.claude = {
   fork = true,
   subagents = true,
   DEFAULT_TOOLS = { "Bash(code-review:*)", "Read", "Grep", "Glob" },
-  EDIT_TOOLS = { "Edit", "Write" }, -- added for local reviews (not PRs)
   args = function(o)
     local c = o.cfg
     local args = { o.cmd, "-p", o.prompt, "--output-format", "stream-json", "--verbose" }
@@ -68,9 +76,10 @@ M.claude = {
     if not tools then
       tools = vim.list_extend(vim.deepcopy(M.claude.DEFAULT_TOOLS), { "Bash(" .. M.BIN .. "/code-review:*)" })
       if o.edit then
-        -- the prompt asks for the changes the comments request; Claude only
-        -- edits inside its directory and the --add-dir ones
-        vim.list_extend(tools, M.claude.EDIT_TOOLS)
+        -- the prompt asks for the changes the comments request: only in the
+        -- reviewed project, never in the directory a fork started in. `//` is an
+        -- absolute path; an Edit rule covers Write too.
+        tools[#tools + 1] = "Edit(/" .. vim.fs.normalize(o.edit) .. "/**)"
       end
     end
     if #tools > 0 then

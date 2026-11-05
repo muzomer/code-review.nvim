@@ -371,8 +371,7 @@ function cmds.ls(root, pos, flags)
 end
 
 function cmds.skill()
-  local here = debug.getinfo(1, "S").source:sub(2)
-  local path = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(here))) .. "/skills/nvim-code-review/SKILL.md"
+  local path = vim.fs.dirname(require("code-review.agents").BIN) .. "/skills/nvim-code-review/SKILL.md"
   local f = assert(io.open(path, "r"))
   io.stdout:write(f:read("a"))
   f:close()
