@@ -101,6 +101,18 @@ end
 
 M.DEFAULT_TOOLS = agents.claude.DEFAULT_TOOLS
 
+---Does any thread waiting on the agent allow it to change code?
+local function may_edit(root)
+  local prompt = require("code-review.prompt")
+  if prompt.changes_mode() == "auto" then
+    return true
+  end
+  local ok, data = pcall(store.read, root)
+  return ok and vim.iter(data.threads):any(function(t)
+    return t.approved == true and t.needs == "agent" and t.status ~= "resolved"
+  end) or false
+end
+
 ---Command line of a run. `resume` = id of the session to continue, `new_id` =
 ---id for a new one (agents that take one), `fork` = id of a session to copy.
 ---@param opts { resume?: string, new_id?: string, fork?: string, agent?: string, cwd?: string }
@@ -120,7 +132,8 @@ function M.args(root, text, opts)
   local args = a.args({
     cmd = M.command(opts.agent), prompt = text, cwd = cwd, dirs = dirs, cfg = cfg(),
     new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
-    edit = not pr and root or nil, -- a local review asks for code changes; a PR has no checkout to change
+    -- a PR has no checkout to change; a local review only where the reviewer allows it
+    edit = not pr and may_edit(root) and root or nil,
   })
   vim.list_extend(args, cfg().args or {})
   return args

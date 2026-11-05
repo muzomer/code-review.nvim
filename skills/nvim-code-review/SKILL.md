@@ -21,7 +21,14 @@ inside the project.
 2. For each thread:
    - Read the surrounding code in the file. Line numbers are current: the CLI
      re-anchors threads to code that moved before listing them.
-   - If the comment asks for a change, make it, then reply saying what you did.
+   - Change code only for threads marked `change approved` (or when the prompt
+     you were given says to make the changes). For any other thread, even one
+     that asks for a change, do not edit files: reply with the change you
+     propose (a ```suggestion block, or a short description). The reviewer
+     approves it in Neovim, and the thread comes back to you marked approved.
+     An approval covers that one change: after your reply, the thread is
+     discuss-only again until the reviewer approves again.
+   - For an approved thread, make the change, then reply saying what you did.
    - If it is a question or you disagree, reply with your answer. Do not resolve.
    - If something is unclear, ask in the thread rather than guessing.
 3. Reply:

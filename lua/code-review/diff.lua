@@ -1194,6 +1194,7 @@ M.QF_ACTIONS = {
   reply = { function(root, tid) require("code-review").reply(root, tid) end, "reply" },
   edit = { function(root, tid) require("code-review").edit(root, tid) end, "edit your last message" },
   resolve = { function(root, tid) require("code-review").toggle_resolved(root, tid) end, "resolve / reopen" },
+  approve = { function(root, tid) require("code-review").toggle_approved(root, tid) end, "approve / withdraw a code change" },
   delete = { function(root, tid) require("code-review").delete(root, tid) end, "delete the thread" },
   send = { function(root) require("code-review").poke(root) end, "send to the agent" },
   help = { function() require("code-review").help("list") end, "keys", list = true },

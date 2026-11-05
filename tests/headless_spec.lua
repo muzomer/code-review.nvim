@@ -87,8 +87,13 @@ describe("background agent", function()
     assert(p.args[3]:find("exactly as written", 1, true), p.args[3])
   end)
 
-  case("a PR review stays read-only; a local one may edit", function()
+  case("a PR review stays read-only; a local one may edit once a change is approved", function()
     local root = project()
+    local function edits(args)
+      return vim.iter(args):any(function(a) return a:find("^Edit") ~= nil or a:find("^Write") ~= nil end)
+    end
+    eq(edits(headless.args(root, "x", { new_id = "id" })), false) -- discuss first: nothing approved yet
+    store.update(root, function(d) store.set_approved(d.threads[1], true) end)
     local args = headless.args(root, "x", { new_id = "id" })
     -- only inside the project (`//` = absolute); an Edit rule covers Write, a bare Write would allow any path
     assert(vim.tbl_contains(args, "Edit(/" .. vim.fs.normalize(root) .. "/**)"), vim.inspect(args))

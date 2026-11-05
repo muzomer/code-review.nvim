@@ -21,6 +21,7 @@ M.config = {
     auto_poke = "<leader>cA", -- toggle: <C-s> in the comment box also pokes the agent
     output = "<leader>cP", -- show / hide the live output of the agent you poked
     resolve = "<leader>cx", -- toggle resolved
+    approve = "<leader>cy", -- local review: let the agent change the code for this thread (again: withdraw)
     list = { "<C-l>", "<leader>cl" }, -- toggle the open threads of the project (quickfix)
     list_all = { "<C-S-l>", "<leader>cL" }, -- toggle all threads, resolved too (Ctrl+Shift+L needs a terminal that reports it, e.g. kitty)
     next = "]r", -- next thread in buffer (takes a count)
@@ -44,6 +45,7 @@ M.config = {
       edit = "e", -- your last message, until the agent answers
       send = "s", -- poke the agent
       resolve = "x", -- resolve / reopen
+      approve = "a", -- let the agent change the code for it / withdraw that
       delete = "d",
       next = "n", -- next / previous thread in the file (also keymaps.next / prev)
       prev = "p",
@@ -85,6 +87,10 @@ M.config = {
   progress_float = true, -- where: true = floating window, false = winbar/statusline only, "auto" = winbar in a PR review, else float
   progress_output = false, -- ... and also open the live output window right away
   auto_poke = false, -- <C-s> in the comment box also pokes the agent (then <M-s> only saves); toggle: keymaps.auto_poke
+  -- local reviews: "discuss" = the agent answers and proposes changes, and changes
+  -- the code only for threads you approve (keymaps.approve); "auto" = it changes
+  -- the code whenever a comment asks for it
+  agent_changes = "discuss",
   open_after_send = true, -- after <M-s> on a new comment, open its thread to watch the reply come in
   agent = "auto", -- who gets poked: "auto" (a herdr agent you pick, else the background agent), "herdr", "headless"
   isolate = "fork", -- keep the work out of a herdr agent's session: "fork" (a throwaway copy of it answers in the
@@ -974,7 +980,8 @@ function M.thread_markdown(t)
   local loc = r.start == r["end"] and tostring(r.start) or (r.start .. "-" .. r["end"])
   local quote = M.quote(t, 60)
   local lines = {
-    string.format("`%s:%s`%s · %s · needs %s", t.file, loc, quote and (" on " .. quote) or "", t.status, t.needs),
+    string.format("`%s:%s`%s · %s · needs %s%s", t.file, loc, quote and (" on " .. quote) or "", t.status, t.needs,
+      t.approved and " · change approved" or ""),
     "",
   }
   local code = (t.anchor or {}).text or {}
@@ -1068,6 +1075,7 @@ function M.thread_footer(width)
     { one("edit", "edit"), 7 },
     { one("send", "send"), 2 },
     { one("resolve", "resolve"), 3 },
+    { M.config.agent_changes ~= "auto" and one("approve", "approve change") or nil, 10 },
     { one("delete", "delete"), 9 },
     { one("help", "keys"), 4 },
     { one("close", "close"), 5 },
@@ -1145,6 +1153,7 @@ function M.open_thread(root, tid, refresh)
     keys.set("n", tk.send, function() M.poke(root) end, o)
     keys.set("n", tk.help, function() M.help("thread") end, o)
     keys.set("n", tk.resolve, function() M.toggle_resolved(root, tid) end, o)
+    keys.set("n", tk.approve, function() M.toggle_approved(root, tid) end, o)
     keys.set("n", tk.delete, function() M.delete(root, tid) end, o)
     -- Step to the neighbouring thread in the source buffer without closing.
     local function step(dir)
@@ -1313,6 +1322,7 @@ local HELP_GLOBAL = {
   { "open", "open the thread under the cursor" },
   { "edit", "edit your last comment (until the agent replies)" },
   { "resolve", "resolve / reopen the thread" },
+  { "approve", "let the agent change the code for this thread (again: withdraw)" },
   { "next", "next thread in this file" },
   { "prev", "previous thread in this file" },
   { "next_yours", "next thread waiting for you" },
@@ -1345,6 +1355,7 @@ local HELP_CONTEXT = {
       { "input", "submit_alt", "send and poke the agent" },
       { "thread", "edit", "edit your last message" },
       { "thread", "resolve", "resolve / reopen" },
+      { "thread", "approve", "approve / withdraw a code change" },
       { "thread", "delete", "delete the thread" },
       { "thread", "send", "poke the agent" },
       { "thread", "close", "close the panel" },
@@ -1361,6 +1372,7 @@ local HELP_CONTEXT = {
       { "thread", "edit", "edit your last message" },
       { "thread", "send", "send to the agent (poke)" },
       { "thread", "resolve", "resolve / reopen" },
+      { "thread", "approve", "approve / withdraw a code change" },
       { "thread", "delete", "delete the thread" },
       { "thread", "close", "close" },
     },
@@ -1372,6 +1384,7 @@ local HELP_CONTEXT = {
       { "thread", "reply", "reply (in the box: submit saves, submit_alt saves + sends to the agent)" },
       { "thread", "edit", "edit your last message" },
       { "thread", "resolve", "resolve / reopen" },
+      { "thread", "approve", "approve / withdraw a code change" },
       { "thread", "delete", "delete the thread" },
       { "thread", "send", "send to the agent (poke)" },
       { "thread", "close", "close the list" },
@@ -1842,6 +1855,33 @@ function M.toggle_resolved(root, tid)
   after_write(root)
 end
 
+---Let the agent change the code for thread `tid` once (with agent_changes =
+---"discuss": until its next reply), or withdraw that. Either is a message in the thread, so the agent
+---hears about it on the next poke (now, with auto_poke).
+function M.toggle_approved(root, tid)
+  local pr = session.load(root)
+  if pr and pr.kind == "pr" then
+    return notify("a PR review has no checkout: the agent proposes changes as suggestions", vim.log.levels.WARN)
+  end
+  if M.config.agent_changes == "auto" then
+    return notify("agent_changes = \"auto\": the agent changes the code without approval", vim.log.levels.WARN)
+  end
+  local on
+  if not try_update(root, function(data)
+    local t = store.find(data, tid)
+    if not t then
+      return store.UNCHANGED
+    end
+    on = not t.approved
+    store.set_approved(t, on)
+  end) or on == nil then
+    return
+  end
+  after_write(root)
+  notify(on and ("change approved for " .. tid) or ("approval withdrawn for " .. tid))
+  maybe_poke(root, M.config.auto_poke)
+end
+
 function M.delete(root, tid)
   if vim.fn.confirm("Delete thread " .. tid .. "?", "&Yes\n&No", 2) ~= 1 then
     return
@@ -2181,7 +2221,7 @@ function M.jump(dir, count)
   M.flash()
 end
 
-M.prompt = [[I left review comments on the code for you. Run `code-review list --needs agent` to see them (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> "..."`, make any changes requested, and only resolve a thread with `code-review resolve <id>` once the change is done.]]
+M.prompt = [[I left review comments on the code for you. Run `code-review list --needs agent` to see them (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> "..."`, change the code only for threads marked `change approved` (propose other changes as a ```suggestion block), and only resolve a thread with `code-review resolve <id>` once it is settled.]]
 
 ---The prompt for the agent; in a PR review every command needs `--pr`.
 ---The prompt for the agent: every thread waiting on it, in full (for copying).
@@ -2333,6 +2373,9 @@ local subcommands = {
   resolve = function()
     M.with_thread_at_cursor(M.toggle_resolved)
   end,
+  approve = function()
+    M.with_thread_at_cursor(M.toggle_approved)
+  end,
   delete = function()
     M.with_thread_at_cursor(M.delete)
   end,
@@ -2427,6 +2470,7 @@ local DEFAULTS -- M.config before the first setup
 -- Options whose value is one of a few, or of more than one type.
 local CHOICES = {
   conversation = { "float", "panel" },
+  agent_changes = { "discuss", "auto" },
   agent = { "auto", "herdr", "headless" },
   isolate = { "fork", "subagent", false },
   progress_float = { true, false, "auto" },
@@ -2631,6 +2675,9 @@ function M.setup(opts)
   end
   if km.resolve then
     keys.set("n", km.resolve, subcommands.resolve, { desc = "Code review: resolve/reopen thread" })
+  end
+  if km.approve then
+    keys.set("n", km.approve, subcommands.approve, { desc = "Code review: approve / withdraw a code change" })
   end
   if km.list then
     keys.set("n", km.list, function() M.toggle_list(false) end, { desc = "Code review: toggle the open threads list" })

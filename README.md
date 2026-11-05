@@ -45,6 +45,7 @@ from `:terminal` find it.
 | `<leader>cr`                                           | open the thread under the cursor; with several on the line, the one whose text you are on, else a picker     |
 | `<leader>ce` (`:CodeReview edit`)                      | edit your last comment of the thread under the cursor, until the agent replies                               |
 | `<leader>cx`                                           | resolve / reopen the thread under the cursor                                                                 |
+| `<leader>cy` (`:CodeReview approve`)                   | let the agent change the code for the thread under the cursor (again: withdraw); `a` in a thread             |
 | `:CodeReview delete`                                   | delete the thread under the cursor                                                                           |
 | `]r` / `[r`                                            | next / previous thread in the buffer, one stop per thread (wraps, takes a count)                             |
 | `]u` / `[u`                                            | next / previous thread waiting for you (the agent replied), across files                                     |
@@ -188,10 +189,22 @@ the agent runs:
   Claude Code is tested against its CLI; the others follow their documentation.
 
 `<leader>cP` shows the output of a fork or of the background agent. By default
-Claude may run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`),
-and in a local review also change them (`Edit`, `Write`) — only inside the
-reviewed project (`Edit(//<project>/**)`), never in the directory a fork
-started in (a fork gets the project with `--add-dir`).
+Claude may run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`).
+
+**Discuss first.** By default (`agent_changes = "discuss"`) the agent does not
+change code because a comment asks for it: it answers and proposes the change
+(a ```suggestion block). When you agree, press `<leader>cy` (or `a` in the
+thread): that adds "Go ahead: apply the changes" to the thread and marks it
+approved, and the next poke tells the agent to make the change. Press it again
+to withdraw. An approval is for one answer: once the agent replies in the
+thread, a later question there is discussed again until you approve again. Only then
+may Claude change files (`Edit`, `Write`) — only inside the reviewed project
+(`Edit(//<project>/**)`), never in the directory a fork started in (a fork gets
+the project with `--add-dir`). The permission covers the whole run: when one
+thread is approved, the others in that run are kept unchanged by the prompt
+alone. For the other agents the prompt asks them not
+to edit; their own sandbox settings are what enforces it. Set
+`agent_changes = "auto"` to let the agent change code whenever a comment asks.
 A PR review stays read-only. Set `headless.allowed_tools` (it replaces the whole
 list) or `headless.permission_mode` to choose differently.
 
@@ -229,6 +242,7 @@ require("code-review").setup({
     open = "<leader>cr",        -- open the thread under the cursor
     edit = "<leader>ce",        -- edit your last comment, until the agent replies
     resolve = "<leader>cx",     -- resolve / reopen
+    approve = "<leader>cy",     -- let the agent change the code for this thread (again: withdraw)
     list = { "<C-l>", "<leader>cl" },        -- toggle open threads → quickfix
     list_all = { "<C-S-l>", "<leader>cL" },  -- toggle all threads, resolved too (Ctrl+Shift+L: kitty, WezTerm, ...)
     next = "]r", prev = "[r",   -- next / previous thread in the buffer
@@ -249,7 +263,7 @@ require("code-review").setup({
     recent = "<leader>cR",      -- resume a recent PR review
     -- on a thread: the thread window, the thread list (quickfix) and the conversation panel
     thread = {
-      reply = { "r", "i" }, edit = "e", send = "s", resolve = "x", delete = "d",
+      reply = { "r", "i" }, edit = "e", send = "s", resolve = "x", approve = "a", delete = "d",
       next = "n", prev = "p",           -- next / previous thread in the file
       next_file = "N", prev_file = "P", -- next / previous thread across files
       help = { "?", "g?" }, close = { "q", "<Esc>" },
@@ -286,6 +300,7 @@ require("code-review").setup({
   isolate = "fork",             -- herdr agents: "fork" (a throwaway copy answers, Claude / OpenCode),
                                 -- "subagent" (typed; Claude delegates), false (typed as is)
   auto_poke = false,            -- <C-s> also sends to the agent, <M-s> only saves
+  agent_changes = "discuss",    -- local review: change code only for threads you approve (<leader>cy); "auto": always
   open_after_send = true,       -- a new comment sent to the agent opens its thread
   headless = {                  -- the background agent
     agent = "claude",           -- "claude", "codex", "opencode", "gemini"

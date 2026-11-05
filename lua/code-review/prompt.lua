@@ -32,7 +32,20 @@ end
 ---of the last message (an edited comment counts as new).
 function M.signature(t)
   local last = t.messages[#t.messages]
-  return last and last.edited and (#t.messages .. ":" .. last.edited) or tostring(#t.messages)
+  local sig = last and last.edited and (#t.messages .. ":" .. last.edited) or tostring(#t.messages)
+  return t.approved and (sig .. ":approved") or sig
+end
+
+---"discuss": the agent changes code only for threads the reviewer approved;
+---"auto": for every thread (config.agent_changes).
+function M.changes_mode()
+  local cr = package.loaded["code-review"]
+  return cr and cr.config and cr.config.agent_changes == "auto" and "auto" or "discuss"
+end
+
+---May the agent change code for thread `t`?
+function M.may_change(t)
+  return M.changes_mode() == "auto" or t.approved == true
 end
 
 local function cut(s, max)
@@ -123,13 +136,16 @@ function M.build(root, opts)
   end
 
   local fresh, older, sent = {}, {}, {}
+  local any_approved = false -- any waiting thread (sent before or not) the agent may change code for
   for _, t in ipairs(ok and data.threads or {}) do
     if t.needs == "agent" and t.status ~= "resolved" then
       sent[t.id] = M.signature(t)
       if seen[t.id] ~= sent[t.id] then
         fresh[#fresh + 1] = t
       else
-        older[#older + 1] = t.id
+        local approved = not pr and M.changes_mode() == "discuss" and t.approved
+        older[#older + 1] = t.id .. (approved and " (change approved)" or "")
+        any_approved = any_approved or approved
       end
     end
   end
@@ -153,7 +169,9 @@ function M.build(root, opts)
     if span then -- the comment is about this text in those lines
       where = where .. string.format(' on "%s"', cut(span:gsub("\n", "⏎"), M.MAX_LINE))
     end
-    local parts = { string.format("[%s] %s — %s", t.id, where, followup and "follow-up" or "new") }
+    local approved = not pr and M.changes_mode() == "discuss" and t.approved
+    any_approved = any_approved or approved
+    local parts = { string.format("[%s] %s — %s%s", t.id, where, followup and "follow-up" or "new", approved and " · change approved" or "") }
     local code = code_of(t)
     if code ~= "" then
       parts[#parts + 1] = code
@@ -197,8 +215,16 @@ function M.build(root, opts)
     lines[#lines + 1] = string.format("There is no checkout: `%s diff` prints where the base/head snapshots of the changed files are;"
       .. " for any other file run `%s file <path>` and read the path it prints. You cannot change the PR,"
       .. " so answer with explanations or suggested code (a ```suggestion block replaces the commented lines).", cli, cli)
-  else
+  elseif M.changes_mode() == "auto" then
     lines[#lines + 1] = "Make the changes the comments ask for in the code, then reply."
+  else
+    local any = any_approved
+    if any then
+      lines[#lines + 1] = "For the threads marked `change approved`, make the changes they ask for in the code, then reply."
+    end
+    lines[#lines + 1] = (any and "For every other thread, do not edit any file" or "Do not edit any file")
+      .. ", even if a comment asks for a change: the reviewer approves changes first. Answer, and when code should"
+      .. " change, show it in a ```suggestion block (it replaces the commented lines) or describe it."
   end
   lines[#lines + 1] = M.STYLE[opts.style or "plain"] or M.STYLE.plain
   return table.concat(lines, "\n"), sent, counts
@@ -209,8 +235,11 @@ function M.generic(root)
   local s = session.load(root)
   if not (s and s.kind == "pr") then
     return "I left review comments on the code for you. Run `code-review list --needs agent` to see them"
-      .. " (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> \"...\"`,"
-      .. " make any changes requested, and only resolve a thread with `code-review resolve <id>` once the change is done."
+      .. " (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> \"...\"`."
+      .. (M.changes_mode() == "auto" and " Make any changes requested,"
+        or " Change the code only for threads marked `change approved`; for the others answer and propose changes"
+          .. " as a ```suggestion block,")
+      .. " and only resolve a thread with `code-review resolve <id>` once it is settled."
   end
   local cli = string.format("code-review --pr %s/%s#%d", s.owner, s.repo, s.number)
   return string.format("I am reviewing PR %s/%s#%d in Neovim (no checkout) and left comments for you. Run `%s list --needs agent`"

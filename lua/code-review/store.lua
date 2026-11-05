@@ -329,6 +329,9 @@ end
 function M.add_message(t, author, body)
   local msg = { id = t.id .. "." .. (#t.messages + 1), author = author, body = body, ts = M.now() }
   t.messages[#t.messages + 1] = msg
+  if author ~= "user" then
+    t.approved = nil -- an approval is for one answer: the agent replied, the next change needs a new one
+  end
   return msg
 end
 
@@ -350,6 +353,22 @@ function M.edit_last_user_message(t, body)
   last.body = body
   last.edited = M.now()
   return true
+end
+
+-- What a reviewer's approval says in the thread (the agent reads it like any message).
+M.APPROVE = "Go ahead: apply the changes"
+M.REVOKE = "Approval withdrawn: do not change the code for this; discuss it first."
+
+---Approve (or withdraw approval for) changing the code for thread `t` in a local
+---review: the flag lets the agent edit files, the message tells it so. It holds
+---until the agent's next reply in the thread (see add_message).
+function M.set_approved(t, on)
+  t.approved = on or nil
+  M.add_message(t, "user", on and M.APPROVE or M.REVOKE)
+  if on and t.status == "resolved" then
+    t.status = "open"
+  end
+  M.refresh_needs(t)
 end
 
 ---@param o {file:string, side?:"old"|"new", base?:string, start:integer, ["end"]:integer, start_col?:integer, end_col?:integer, anchor:table, author:string, body:string}
