@@ -164,7 +164,8 @@ the agent runs:
 
 - **An agent session running in [herdr](https://herdr.dev)** (Claude Code,
   Codex, OpenCode, Gemini CLI, …): you pick it once per review and it is
-  remembered. By default (`isolate = "fork"`) an agent that can fork sessions is
+  remembered. The picker opens after your first comment (or on the first poke,
+  if that comes first); choosing there sends nothing yet. By default (`isolate = "fork"`) an agent that can fork sessions is
   not typed into: a throwaway fork of its session answers in the background
   (`claude -p --resume <id> --fork-session`, `opencode run --session <id> --fork`).
   The fork knows everything the session knew, and the session's context gets

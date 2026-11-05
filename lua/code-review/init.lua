@@ -1766,7 +1766,11 @@ function M.add(line1, line2, cols)
     if now and M.config.open_after_send and tid then
       M.open_thread(root, tid)
     end
-    maybe_poke(root, now)
+    if now then
+      M.poke(root) -- asks which agent itself when none is chosen
+    else
+      require("code-review.poke").choose_if_unset(root)
+    end
   end)
 end
 

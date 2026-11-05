@@ -196,6 +196,57 @@ describe("poke", function()
       restore()
     end)
 
+    local function comment(r, line, text)
+      vim.cmd.edit(r .. "/f.lua")
+      ac.add(line, line)
+      api.nvim_buf_set_lines(0, 0, -1, false, { text })
+      feed("<C-s>")
+    end
+
+    it("the first comment asks which agent, without poking it; later ones do not ask", function()
+      fake()
+      local r = tmp_project({ ["f.lua"] = { "one", "two" } })
+      comment(r, 1, "first")
+      eq(picks, 1)
+      eq(#prompts(), 0) -- only chosen, not sent
+      eq(poke.saved_target(r).pane_id, "w1:p1")
+      comment(r, 2, "second")
+      eq(picks, 1)
+      eq(#store.read(r).threads, 2)
+      restore()
+    end)
+
+    it("a dismissed picker does not come back on every comment", function()
+      fake()
+      vim.ui.select = function(_, _, cb)
+        picks = picks + 1
+        cb(nil)
+      end
+      local r = tmp_project({ ["f.lua"] = { "one", "two" } })
+      comment(r, 1, "first")
+      comment(r, 2, "second")
+      eq(picks, 1)
+      eq(poke.saved_target(r), nil)
+      restore()
+    end)
+
+    it("does not ask without herdr agents to choose from", function()
+      fake()
+      local r = tmp_project({ ["f.lua"] = { "one", "two" } })
+      poke.available = function() return false end
+      comment(r, 1, "no herdr")
+      local old = agents
+      agents = { old[3] } -- only this pane
+      poke.available = function() return true end
+      local r2 = tmp_project({ ["f.lua"] = { "one", "two" } })
+      comment(r2, 1, "nobody else")
+      agents = old
+      eq(picks, 0)
+      eq(poke.saved_target(r), nil)
+      eq(poke.saved_target(r2), nil)
+      restore()
+    end)
+
     it("pokes right after adding a comment when auto_poke is on", function()
       fake()
       ac.config.auto_poke = true

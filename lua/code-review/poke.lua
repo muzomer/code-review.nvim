@@ -113,8 +113,8 @@ M.decode = decode
 ---Agents herdr knows about (this pane excluded).
 ---@return table[]? agents { pane_id, title, status, cwd }
 ---@return string? err
-function M.agents()
-  local result, err = decode(M.run({ "herdr", "agent", "list" }))
+local function agent_list(res)
+  local result, err = decode(res)
   if not result then
     return nil, err
   end
@@ -136,6 +136,10 @@ function M.agents()
   return list
 end
 
+function M.agents()
+  return agent_list(M.run({ "herdr", "agent", "list" }))
+end
+
 M.HEADLESS = "headless" -- pane_id of the background agent (claude -p) in a saved target
 
 local function headless_target(root)
@@ -150,10 +154,13 @@ end
 ---once `on_pick` reports the poke went through, so a broken agent is not
 ---tried again on every poke.
 ---@param on_pick fun(target: table): boolean? ok
-function M.pick(root, on_pick)
+---@param listed? table[] the herdr agents, when the caller has just listed them
+function M.pick(root, on_pick, listed)
   local headless = require("code-review.headless")
   local agents, err = {}, nil
-  if M.available() then
+  if listed then
+    agents = vim.list_extend({}, listed)
+  elseif M.available() then
     agents, err = M.agents()
     if not agents then
       notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
@@ -185,6 +192,29 @@ function M.pick(root, on_pick)
     resume()
     if choice and on_pick(choice) then
       save_target(root, choice)
+    end
+  end)
+end
+
+local asked = {} -- root → true: choose_if_unset already asked in this Neovim
+
+---Ask which agent reviews this project when none is chosen yet, without poking
+---it: called after your first comment, so a later send goes straight there.
+---Asks only when herdr runs agents to choose from (else the background agent
+---needs no choice), and once per review in a Neovim, so a dismissed picker
+---does not come back on every comment.
+function M.choose_if_unset(root)
+  local config = require("code-review").config
+  if (config.agent or "auto") == "headless" or asked[root] or not M.available() or M.saved_target(root) then
+    return
+  end
+  asked[root] = true
+  M.run_async({ "herdr", "agent", "list" }, function(res)
+    local agents = agent_list(res)
+    if agents and #agents > 0 and not M.saved_target(root) then
+      M.pick(root, function()
+        return true -- remember it; nothing is sent yet
+      end, agents)
     end
   end)
 end
