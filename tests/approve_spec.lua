@@ -95,6 +95,20 @@ describe("approving code changes", function()
     assert(prompt.signature(t) ~= before)
   end)
 
+  it("approving, and withdrawing, are sent to the agent at once", function()
+    local root, ids = project()
+    local poke, poked = ac.poke, {}
+    ac.poke = function(r) poked[#poked + 1] = r end
+    local ok, err = pcall(function()
+      ac.toggle_approved(root, ids[1])
+      eq(poked, { root })
+      ac.toggle_approved(root, ids[1])
+      eq(poked, { root, root })
+    end)
+    ac.poke = poke
+    assert(ok, err)
+  end)
+
   it("pressing it again withdraws the approval", function()
     local root, ids = project()
     ac.toggle_approved(root, ids[1])

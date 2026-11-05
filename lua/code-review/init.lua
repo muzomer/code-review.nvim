@@ -1856,8 +1856,8 @@ function M.toggle_resolved(root, tid)
 end
 
 ---Let the agent change the code for thread `tid` once (with agent_changes =
----"discuss": until its next reply), or withdraw that. Either is a message in the thread, so the agent
----hears about it on the next poke (now, with auto_poke).
+---"discuss": until its next reply), or withdraw that. Either is a message in the
+---thread, sent to the agent straight away.
 function M.toggle_approved(root, tid)
   local pr = session.load(root)
   if pr and pr.kind == "pr" then
@@ -1879,7 +1879,7 @@ function M.toggle_approved(root, tid)
   end
   after_write(root)
   notify(on and ("change approved for " .. tid) or ("approval withdrawn for " .. tid))
-  maybe_poke(root, M.config.auto_poke)
+  M.poke(root) -- an approval (or withdrawing it) is meant for the agent now, not on the next send
 end
 
 function M.delete(root, tid)
