@@ -70,6 +70,14 @@ describe("key bindings", function()
     ac.setup({ notify = false })
   end)
 
+  it("an empty group is valid and keeps that group's defaults", function()
+    local keys = require("code-review.keys")
+    local defaults = { input = { submit = "<C-s>" }, list = "q" }
+    local out, problems = keys.validate({ input = {} }, defaults)
+    eq(problems, {})
+    eq(keys.merge(defaults, out).input, { submit = "<C-s>" })
+  end)
+
   it("setup reports wrong options and keeps their defaults", function()
     local ac = require("code-review")
     local notify, notes = vim.notify, {}

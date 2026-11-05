@@ -25,6 +25,12 @@ function M.set(modes, v, fn, opts)
   end
 end
 
+-- A group of bindings (thread, input, sidebar): a table with keys, not a list.
+-- An empty table counts as one (vim.islist({}) is true): it changes nothing.
+local function is_group(v)
+  return type(v) == "table" and (next(v) == nil or not vim.islist(v))
+end
+
 ---Merge the user's `keymaps` into the defaults. A binding the user sets replaces
 ---the default as a whole (a deep merge would mix two key lists entry by entry);
 ---groups (thread, input, sidebar) are merged binding by binding.
@@ -35,8 +41,7 @@ function M.merge(defaults, user)
   local out = vim.deepcopy(defaults)
   for k, v in pairs(user or {}) do
     local d = out[k]
-    -- a group (an empty table counts as one: vim.islist({}) is true)
-    if type(v) == "table" and (next(v) == nil or not vim.islist(v)) and type(d) == "table" and not vim.islist(d) then
+    if is_group(v) and is_group(d) then
       for k2, v2 in pairs(v) do
         d[k2] = v2
       end
@@ -69,8 +74,8 @@ function M.validate(user, defaults)
   local out = {}
   for k, v in pairs(user) do
     local d = defaults[k]
-    if type(d) == "table" and not vim.islist(d) then -- a group
-      if type(v) ~= "table" or vim.islist(v) then
+    if is_group(d) then
+      if not is_group(v) then
         problems[#problems + 1] = string.format("keymaps.%s must be a table of bindings; using the defaults", k)
       else
         out[k] = {}
