@@ -432,6 +432,37 @@ describe("UX", function()
       eq(diff.complete(r), true)
     end)
 
+    case("a file that arrives while you are in another tab waits for you to come back", function()
+      for k, v in pairs(vim.deepcopy(routes)) do
+        if k:find("/pulls/41", 1, true) or k:find("4141", 1, true) then
+          local k2 = k:gsub("/pulls/41", "/pulls/43"):gsub("4141", "4343")
+          routes[k2] = type(v) == "table" and vim.deepcopy(v) or v
+        end
+      end
+      routes["/pulls/43"].base.sha, routes["/pulls/43"].head.sha = "BASE4343aaaa", "HEAD4343bbbb"
+      local queue, run_async = {}, github.run_async
+      github.run_async = function(args, cb)
+        queue[#queue + 1] = function() cb(github.run(args)) end
+      end
+      diff.open("acme/ux#43")
+      table.remove(queue, 1)() -- the PR
+      table.remove(queue, 1)() -- its file list: the review opens with a placeholder
+      local review = api.nvim_get_current_tabpage()
+      vim.cmd.tabnew()
+      local mine = api.nvim_get_current_tabpage()
+      while #queue > 0 do
+        table.remove(queue, 1)()
+      end
+      github.run_async = run_async
+      eq(api.nvim_get_current_tabpage(), mine) -- not pulled back to the review
+      api.nvim_set_current_tabpage(review)
+      vim.api.nvim_exec_autocmds("TabEnter", {})
+      vim.wait(200, function() return #vim.tbl_filter(function(w) return vim.wo[w].diff end, api.nvim_tabpage_list_wins(0)) == 2 end)
+      local panes = vim.tbl_filter(function(w) return vim.wo[w].diff end, api.nvim_tabpage_list_wins(0))
+      eq(#panes, 2) -- the placeholder became the real diff once you came back
+      vim.cmd("tabclose " .. api.nvim_tabpage_get_number(mine))
+    end)
+
     case("a PR reviewed before opens from its snapshots straight away", function()
       local calls, run = 0, github.run
       github.run = function(args)

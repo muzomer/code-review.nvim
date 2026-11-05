@@ -193,6 +193,23 @@ describe("PR failures", function()
     end)
   end)
 
+  it("offline with the cache wiped, it does not claim a saved copy", function()
+    with({ { github, "retry_delay_ms", 1 } }, function(notes)
+      fake(pr_routes(908, { { filename = "a.txt", status = "modified" } }, {
+        ["contents/a.txt?ref=B908"] = "a0\n", ["contents/a.txt?ref=H908"] = "a1\n",
+      }))
+      local root = diff.open("acme/fail#908")
+      diff.close()
+      vim.fn.delete(session.load(root).cache, "rf")
+      github.run = function() return { code = 6, stdout = "", stderr = "curl: (6) Could not resolve host" } end
+      diff.open("acme/fail#908")
+      vim.wait(2000, function() return not diff.loading(root) end, 5)
+      assert(not find(notes, "saved copy"), vim.inspect(notes))
+      local n = find(notes, "Could not resolve host")
+      assert(n and n.level == vim.log.levels.ERROR, vim.inspect(notes))
+    end)
+  end)
+
   it("explains GitHub errors from their message, rate limits included", function()
     local function status(code, body)
       github.run = function() return { code = 0, stdout = body .. "\n" .. code, stderr = "" } end

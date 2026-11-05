@@ -508,8 +508,8 @@ function M.show_file(root, file, side, line)
   end
   local esc = vim.fn.fnameescape
   local has_base, has_head = f.status ~= "added", f.status ~= "removed"
-  local base = session.snapshot_path(root, file, "old")
-  local head = session.snapshot_path(root, file, "new")
+  local base = session.snapshot_path_in(s.cache, file, "old")
+  local head = session.snapshot_path_in(s.cache, file, "new")
   -- a file that GitHub did not give us contents for (e.g. binary) has no snapshot
   has_base = has_base and vim.uv.fs_stat(base) ~= nil
   has_head = has_head and vim.uv.fs_stat(head) ~= nil
@@ -1024,6 +1024,41 @@ local function tab_open()
   return tab ~= nil and api.nvim_tabpage_is_valid(tab)
 end
 
+local return_group = api.nvim_create_augroup("code-review-diff-return", { clear = true })
+
+---Show `file` once it has arrived, without pulling the user away from another
+---tab: there it waits until they come back to the review tab (the latest wins).
+local function show_arrived(root, file)
+  if not tab_open() then
+    return
+  end
+  api.nvim_clear_autocmds({ group = return_group })
+  if api.nvim_get_current_tabpage() == tab then
+    local win = api.nvim_get_current_win()
+    M.show_file(root, file)
+    if api.nvim_win_is_valid(win) and sidebar.is_sidebar(win) then
+      api.nvim_set_current_win(win)
+    end
+    return
+  end
+  api.nvim_create_autocmd("TabEnter", {
+    group = return_group,
+    callback = function()
+      if not tab_open() then
+        return true -- the review tab was closed: nothing to show
+      end
+      if api.nvim_get_current_tabpage() == tab then
+        vim.schedule(function()
+          if tab_open() and api.nvim_get_current_tabpage() == tab then
+            M.show_file(root, file)
+          end
+        end)
+        return true
+      end
+    end,
+  })
+end
+
 M.render_every_ms = 100 -- sidebar redraws while files arrive (a big PR sends thousands)
 
 ---Download (or re-download) the PR of `root` in the background and keep the
@@ -1063,11 +1098,7 @@ function M.fetch(root, ref)
       -- unless the review tab was closed meanwhile (that would reopen it)
       if tab_open() and (waiting[root] == path or (not on_screen and shown[root] == path)) then
         waiting[root] = nil
-        local win = api.nvim_get_current_win()
-        M.show_file(root, path)
-        if api.nvim_win_is_valid(win) and sidebar.is_sidebar(win) then
-          api.nvim_set_current_win(win)
-        end
+        show_arrived(root, path)
       end
     end,
     on_progress = function(done, total)
@@ -1081,7 +1112,7 @@ function M.fetch(root, ref)
       waiting[root] = nil
       if not r then
         local msg = ferr or "could not open the PR"
-        if had and not on_screen then
+        if had and not on_screen and M.has_snapshots(root) then
           -- reviewed before (e.g. offline now): open what is on disk
           vim.notify(cr.one_line("code-review: could not download the PR, showing your saved copy: " .. msg), vim.log.levels.WARN)
           return M.resume(root)
@@ -1109,8 +1140,8 @@ function M.fetch(root, ref)
       vim.notify(cr.one_line(string.format("code-review: %s: %d changed files%s · %s keys%s", name, #s.files,
         step and (" · " .. step .. " next file") or "", help, since)))
       local again = pending or (had and was_shown)
-      if again and tab_open() then
-        M.show_file(r, again) -- the same file, now at the new commit
+      if again then
+        show_arrived(r, again) -- the same file, now at the new commit
       end
     end,
   })
