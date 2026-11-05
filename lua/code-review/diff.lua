@@ -521,6 +521,7 @@ function M.show_file(root, file, side, line)
     vim.bo[buf].bufhidden = "wipe"
     api.nvim_buf_set_lines(buf, 0, -1, false, { "", "  ⋯ loading " .. file .. " …" })
     vim.bo[buf].modifiable = false
+    vim.b[buf].code_review_placeholder = true
     api.nvim_win_set_buf(0, buf)
     waiting[root] = file
   elseif has_base and has_head then
@@ -540,7 +541,13 @@ function M.show_file(root, file, side, line)
   elseif has_head or has_base then
     vim.cmd.edit(esc(has_head and head or base))
   else
-    notify(file .. ": no text content to show (binary or too large?)", vim.log.levels.WARN)
+    local msg = file .. ": no text content to show (binary or too large?)"
+    if vim.b.code_review_placeholder then -- its file never came: say so instead of "loading…"
+      vim.bo.modifiable = true
+      api.nvim_buf_set_lines(0, 0, -1, false, { "", "  " .. msg })
+      vim.bo.modifiable = false
+    end
+    notify(msg, vim.log.levels.WARN)
   end
   M.refresh_cache(root)
   M.highlights()
@@ -953,8 +960,14 @@ function M.recent()
     return notify("no reviews yet: open one with :CodeReview pr <url>")
   end
   vim.ui.select(list, { prompt = "Recent reviews", format_item = M.review_line }, function(r)
-    if r then
+    if not r then
+      return
+    end
+    local s = r.session
+    if M.has_snapshots(r.root) then
       M.resume(r.root)
+    else -- the cache was wiped: download the files again
+      M.fetch(r.root, { host = s.host or "github.com", owner = s.owner, repo = s.repo, number = s.number })
     end
   end)
 end
@@ -983,15 +996,35 @@ end
 function M.complete(root)
   local s = session.load(root)
   for _, f in ipairs(s and s.files or {}) do
-    if f.status ~= "added" and not vim.uv.fs_stat(session.snapshot_path(root, f.path, "old")) then
+    if f.status ~= "added" and not vim.uv.fs_stat(session.snapshot_path_in(s.cache, f.path, "old")) then
       return false
     end
-    if f.status ~= "removed" and not vim.uv.fs_stat(session.snapshot_path(root, f.path, "new")) then
+    if f.status ~= "removed" and not vim.uv.fs_stat(session.snapshot_path_in(s.cache, f.path, "new")) then
       return false
     end
   end
   return s ~= nil
 end
+
+---Is any snapshot of the review on disk? (false: never downloaded, or the cache was wiped)
+function M.has_snapshots(root)
+  local s = session.load(root)
+  for _, f in ipairs(s and s.files or {}) do
+    for _, side in ipairs({ "old", "new" }) do
+      if vim.uv.fs_stat(session.snapshot_path_in(s.cache, f.path, side)) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+---Is the review tab still open? (it may have been closed during a download)
+local function tab_open()
+  return tab ~= nil and api.nvim_tabpage_is_valid(tab)
+end
+
+M.render_every_ms = 100 -- sidebar redraws while files arrive (a big PR sends thousands)
 
 ---Download (or re-download) the PR of `root` in the background and keep the
 ---review on screen up to date.
@@ -1003,27 +1036,32 @@ function M.fetch(root, ref)
   local name = string.format("%s/%s#%d", ref.owner, ref.repo, ref.number)
   local had = session.load(root)
   local was_shown = had and shown[root]
+  -- decided now: a review tab closed *during* the download must stay closed
+  local on_screen = was_shown and tab_open()
   loading[root] = true
   M.show_progress(name, nil, nil)
-  github.open_pr_async(ref, {
+  local cr = require("code-review")
+  local last_render = 0
+  local ok, err = pcall(github.open_pr_async, ref, {
     on_meta = function(r)
       M.refresh_cache(r)
-      if not had then
-        local s = session.load(r)
-        local first = sidebar.ordered(s)[1]
-        if first then
-          M.show_file(r, first.path)
-        else
-          M.files(r)
-        end
-      else
+      if on_screen then
         sidebar.render(r)
+      elseif was_shown then -- reloaded with its tab closed: open it again at that file
+        M.show_file(r, was_shown)
+      else -- new, or reviewed before but not open: the first file not viewed yet
+        M.resume(r)
       end
     end,
     on_file = function(path)
-      sidebar.render(root)
-      -- the file on screen (or its "loading…" placeholder) gets the side that arrived
-      if waiting[root] == path or (not had and shown[root] == path) then
+      local now = vim.uv.now()
+      if now - last_render >= M.render_every_ms then -- on_done draws the final state
+        last_render = now
+        sidebar.render(root)
+      end
+      -- the file on screen (or its "loading…" placeholder) gets the side that arrived,
+      -- unless the review tab was closed meanwhile (that would reopen it)
+      if tab_open() and (waiting[root] == path or (not on_screen and shown[root] == path)) then
         waiting[root] = nil
         local win = api.nvim_get_current_win()
         M.show_file(root, path)
@@ -1037,8 +1075,18 @@ function M.fetch(root, ref)
     end,
     on_done = function(r, ferr, failed)
       loading[root] = nil
+      -- a "loading…" placeholder whose file never came (e.g. a 500) is shown again,
+      -- now with the usual "no text content" message
+      local pending = waiting[root]
+      waiting[root] = nil
       if not r then
-        return notify(ferr or "could not open the PR", vim.log.levels.ERROR)
+        local msg = ferr or "could not open the PR"
+        if had and not on_screen then
+          -- reviewed before (e.g. offline now): open what is on disk
+          vim.notify(cr.one_line("code-review: could not download the PR, showing your saved copy: " .. msg), vim.log.levels.WARN)
+          return M.resume(root)
+        end
+        return vim.notify(cr.one_line("code-review: " .. msg), vim.log.levels.ERROR)
       end
       updates[r] = nil
       M.refresh_cache(r)
@@ -1047,9 +1095,12 @@ function M.fetch(root, ref)
       local bad = vim.tbl_keys(failed or {})
       if #bad > 0 then
         table.sort(bad)
-        notify(string.format("%d file(s) could not be downloaded: %s", #bad, table.concat(bad, ", ")), vim.log.levels.WARN)
+        -- one line (a list of every path stops Neovim at "Press ENTER")
+        local first, why = table.concat(vim.list_slice(bad, 1, 3), ", "), failed[bad[1]]
+        local more = #bad > 3 and string.format(" and %d more", #bad - 3) or ""
+        vim.notify(cr.one_line(string.format("code-review: %d file(s) could not be downloaded: %s%s (%s)", #bad, first, more, why)),
+          vim.log.levels.WARN)
       end
-      local cr = require("code-review")
       local km = cr.config.keymaps or {}
       local step = require("code-review.keys").label(km.next_file)
       local help = require("code-review.keys").label(km.help) or "?"
@@ -1057,11 +1108,16 @@ function M.fetch(root, ref)
       -- one line: a longer message stops Neovim at "Press ENTER"
       vim.notify(cr.one_line(string.format("code-review: %s: %d changed files%s · %s keys%s", name, #s.files,
         step and (" · " .. step .. " next file") or "", help, since)))
-      if had and was_shown then
-        M.show_file(r, was_shown) -- the same file, now at the new commit
+      local again = pending or (had and was_shown)
+      if again and tab_open() then
+        M.show_file(r, again) -- the same file, now at the new commit
       end
     end,
   })
+  if not ok then -- e.g. a disk error before any request: never stay "already downloading"
+    loading[root] = nil
+    vim.notify(cr.one_line("code-review: could not open the PR: " .. tostring(err)), vim.log.levels.ERROR)
+  end
   return root
 end
 

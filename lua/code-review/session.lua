@@ -199,7 +199,12 @@ function M.lines(root, file, opts)
     if not opts.base then
       return nil
     end
-    local res = vim.system({ "git", "-C", root, "show", opts.base .. ":" .. file }, { text = true }):wait()
+    -- vim.system throws when git is not installed: that is just "no old text"
+    local ok, proc = pcall(vim.system, { "git", "-C", root, "show", opts.base .. ":" .. file }, { text = true })
+    if not ok then
+      return nil
+    end
+    local res = proc:wait()
     if res.code ~= 0 then
       return nil
     end

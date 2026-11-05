@@ -17,9 +17,20 @@ M.retries = 3
 M.concurrency = 8
 M.retry_delay_ms = 400
 
+-- vim.system throws (instead of failing) when the command is missing: turn
+-- that into a failed result so every caller gets an answer.
+local function spawn(args, on_exit)
+  local ok, proc = pcall(vim.system, args, { text = true }, on_exit)
+  if ok then
+    return proc
+  end
+  return nil, { code = -1, stdout = "", stderr = tostring(proc) }
+end
+
 ---Replaceable in tests: fun(args: string[]): { code: integer, stdout: string, stderr: string }
 M.run = function(args)
-  return vim.system(args, { text = true }):wait()
+  local proc, failed = spawn(args)
+  return proc and proc:wait() or failed
 end
 
 -- Parsing -------------------------------------------------------------------
@@ -61,7 +72,8 @@ function M.token()
   if gh_token == nil and vim.fn.executable("gh") == 1 then
     local res = M.run({ "gh", "auth", "token" })
     local t = res.code == 0 and vim.trim(res.stdout or "") or ""
-    gh_token = t ~= "" and t or false
+    -- a failure is not remembered: `gh auth login` must work without a restart
+    gh_token = t ~= "" and t or nil
   end
   return gh_token or nil
 end
@@ -84,7 +96,11 @@ local function request_args(token, host, path, opts)
     "-H", "Accept: " .. (opts.raw and "application/vnd.github.raw+json" or "application/vnd.github+json"),
     "-H", "X-GitHub-Api-Version: 2022-11-28",
     "-w", "\n%{http_code}",
-    api_base(host) .. path,
+    -- a stalled connection must fail instead of leaving the review "loading"
+    -- forever; file contents can be large, so they get more time
+    "--connect-timeout", "10",
+    "--max-time", opts.raw and "300" or "60",
+    api_base(host) .. path, -- last: tests read the URL from here
   }
 end
 
@@ -109,10 +125,17 @@ local function interpret(res, path, opts)
   status = tonumber(status)
   if status == 404 then
     return nil, "not found: " .. path
-  elseif status == 401 or status == 403 then
-    return nil, string.format("GitHub denied access (%d); check the token's scope for this repo", status)
-  elseif not status or status >= 400 then
-    return nil, string.format("GitHub returned %s for %s", tostring(status), path)
+  end
+  if not status or status >= 400 then
+    -- GitHub explains errors in a JSON `message`
+    local ok, data = pcall(vim.json.decode, body or "")
+    local msg = ok and type(data) == "table" and type(data.message) == "string" and data.message or nil
+    if status == 429 or (status == 403 and msg and msg:lower():find("rate limit", 1, true)) then
+      return nil, "GitHub rate limit reached: try again later (or set GH_TOKEN / run `gh auth login`)"
+    elseif status == 401 or status == 403 then
+      return nil, string.format("GitHub denied access (%d%s); check the token's scope for this repo", status, msg and (": " .. msg) or "")
+    end
+    return nil, string.format("GitHub returned %s for %s%s", tostring(status), path, msg and (": " .. msg) or "")
   end
   if opts.raw then
     return body
@@ -176,11 +199,16 @@ function M.run_many(list)
       local i = next_i
       next_i = next_i + 1
       active = active + 1
-      vim.system(list[i], { text = true }, function(res)
+      local proc, failed = spawn(list[i], function(res)
         results[i] = res
         active = active - 1
         done = done + 1
       end)
+      if not proc then
+        results[i] = failed
+        active = active - 1
+        done = done + 1
+      end
     end
   end
   launch()
@@ -391,7 +419,10 @@ function M.open_pr(ref)
     for i, job in ipairs(jobs) do
       local r = results[i]
       if r.body then
-        write_snapshot(cache, job.side, job.dest, r.body)
+        local saved, werr = pcall(write_snapshot, cache, job.side, job.dest, r.body)
+        if not saved then
+          failed = failed or ("cannot save: " .. tostring(werr))
+        end
       elseif r.err and not r.err:find("^not found") then
         failed = failed or r.err -- a 404 just means "no text here"; anything else is worth reporting
       end
@@ -411,13 +442,17 @@ end
 ---replaced (tests) it runs through it right away.
 function M.run_async(args, cb)
   if M.run ~= default_run then
-    return cb(M.run(args))
+    local ok, res = pcall(M.run, args)
+    return cb(ok and res or { code = -1, stdout = "", stderr = tostring(res) })
   end
-  vim.system(args, { text = true }, function(res)
+  local proc, failed = spawn(args, function(res)
     vim.schedule(function()
       cb(res)
     end)
   end)
+  if not proc then
+    cb(failed) -- e.g. curl is not installed
+  end
 end
 
 ---GET without blocking, with the same retries as M.get. cb(body, err)
@@ -483,12 +518,19 @@ function M.open_pr_async(ref, hooks)
         return call("on_done", nil, ferr, {})
       end
       local root, cache = session.dirs(ref)
-      vim.fn.mkdir(root, "p")
-      local previous = new_generation(root, cache, pr.base.sha, pr.head.sha)
-      vim.fn.mkdir(cache, "p")
-      local changed, jobs = plan(ref, files, cache, pr.base.sha, pr.head.sha)
-      session.save(root, record(ref, pr, changed, cache, previous)) -- early: the review can open now
-      store.ensure_dir(root)
+      -- a disk error (full, read-only) must still end in on_done, never in a review stuck "loading"
+      local ok, changed, jobs = pcall(function()
+        vim.fn.mkdir(root, "p")
+        local previous = new_generation(root, cache, pr.base.sha, pr.head.sha)
+        vim.fn.mkdir(cache, "p")
+        local c, j = plan(ref, files, cache, pr.base.sha, pr.head.sha)
+        session.save(root, record(ref, pr, c, cache, previous)) -- early: the review can open now
+        store.ensure_dir(root)
+        return c, j
+      end)
+      if not ok then
+        return call("on_done", nil, "cannot save the review: " .. tostring(changed), {})
+      end
       call("on_meta", root)
       local failed, done, next_i, active = {}, 0, 1, 0
       if #jobs == 0 then
@@ -503,8 +545,12 @@ function M.open_pr_async(ref, hooks)
             active = active - 1
             done = done + 1
             if body then
-              write_snapshot(cache, job.side, job.dest, body)
-              call("on_file", job.dest, job.side == "base" and "old" or "new")
+              local saved, werr = pcall(write_snapshot, cache, job.side, job.dest, body)
+              if saved then
+                call("on_file", job.dest, job.side == "base" and "old" or "new")
+              else
+                failed[job.dest] = "cannot save: " .. tostring(werr)
+              end
             elseif jerr and not jerr:find("^not found") then
               failed[job.dest] = jerr
             end

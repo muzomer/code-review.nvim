@@ -78,7 +78,10 @@ end
 ---@return integer first, integer last
 function M.translate(buf, row1, row2)
   local d = data[buf]
-  local r1 = d.rows[row1]
+  local r1 = d and d.rows[row1]
+  if not r1 then
+    return nil, "nothing to comment on here" -- an empty view (e.g. a file without text)
+  end
   if d.since and r1.kind == "del" then
     return nil -- that line is gone from the PR: there is no code to comment on
   end
@@ -145,6 +148,12 @@ function M.show(root, file, win, foldtext, opts)
   opts = opts or {}
   local old = opts.old_lines or session.lines(root, file, { side = "old" }) or {}
   local new = session.lines(root, file) or {}
+  -- readfile() turns a NUL byte into "\n", which a buffer line cannot hold;
+  -- "\0" is how a buffer line spells NUL (binary files then show as text)
+  local function nul(lines)
+    return vim.tbl_map(function(l) return (l:gsub("\n", "\0")) end, lines)
+  end
+  old, new = nul(old), nul(new)
   local rows = M.rows(old, new)
 
   local name = "code-review://" .. (opts.since and "since/" or "unified/") .. (root:match("[^/]+/[^/]+/[^/]+/pr%-%d+$") or root) .. "/" .. file

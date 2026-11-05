@@ -382,10 +382,12 @@ function M.render(root, shown)
         local name = f.path:match("[^/]+$")
         local is_viewed = viewed[f.path]
         local c = counts[f.path]
+        -- snapshot_path_in with the session loaded above: snapshot_path would read
+        -- session.json again for every row (seconds on a PR with thousands of files)
         local pieces = {
           { dir ~= "" and "  " or "", nil },
           { current[root] == f.path and "▶" or " ", "CodeReviewQfMarker" },
-          { is_viewed and "✓" or (is_loading and not (vim.uv.fs_stat(session.snapshot_path(root, f.path, f.status == "removed" and "old" or "new"))) and "…" or " "), "CodeReviewQfCheck" },
+          { is_viewed and "✓" or (is_loading and not (vim.uv.fs_stat(session.snapshot_path_in(s.cache, f.path, f.status == "removed" and "old" or "new"))) and "…" or " "), "CodeReviewQfCheck" },
           { " " .. st[1] .. " ", st[2] },
         }
         if use_icons then
