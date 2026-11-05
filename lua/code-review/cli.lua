@@ -3,6 +3,7 @@ local store = require("code-review.store")
 local anchor = require("code-review.anchor")
 local session = require("code-review.session")
 local github = require("code-review.github")
+local uv = vim.uv
 
 local M = {}
 
@@ -208,12 +209,15 @@ function cmds.resolve(root, pos, flags)
 end
 
 function cmds.add(root, pos, flags)
-  local file, s = pos[1], tonumber(pos[2] or "")
+  local function line_no(v) -- 1.5 or 0x2 are not line numbers
+    return v and v:match("^%d+$") and tonumber(v) or nil
+  end
+  local file, s = pos[1], line_no(pos[2])
   if not file or not s then
     error("usage: code-review add <file> <start> [end] <body | ->", 0)
   end
   local rest = 3
-  local e = tonumber(pos[3] or "")
+  local e = line_no(pos[3])
   if e and pos[4] then
     rest = 4
   else
@@ -404,8 +408,16 @@ function M.run(argv)
       return 1
     end
   end
-  root = root or store.find_root()
-  local ok, err = pcall(fn, root, pos, flags)
+  if root and not flags.pr and vim.fn.isdirectory(root) == 0 then -- a typo would make the directory
+    io.stderr:write("code-review: --root " .. flags.root .. " does not exist\n")
+    return 1
+  end
+  local ok, err = pcall(function()
+    if not uv.cwd() and not root then
+      error("the current directory no longer exists; cd somewhere else or pass --root", 0)
+    end
+    return fn(root or store.find_root(), pos, flags)
+  end)
   if not ok then
     io.stderr:write("code-review: " .. tostring(err) .. "\n")
     return 1

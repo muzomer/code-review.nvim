@@ -127,46 +127,127 @@ function M.read(root)
   local s = f:read("a")
   f:close()
   if s:match("^%s*$") then
-    return { version = M.VERSION, threads = {} }
+    -- never written empty: a crash cut it short. Reading it as "no threads"
+    -- would let the next write wipe them for good.
+    error("cannot read " .. file .. ": the file is empty (delete it to start over)", 0)
   end
   local ok, data = pcall(vim.json.decode, s, { luanil = { object = true, array = true } })
   if not ok or type(data) ~= "table" then
-    error("code-review: cannot parse " .. file .. ": " .. tostring(data), 0)
+    error("cannot parse " .. file .. ": " .. tostring(data), 0)
   end
   data.version = data.version or M.VERSION
   data.threads = data.threads or {}
+  M.check(data, file)
   return data
 end
 
+---Fail with a clear message on a store that is not the shape the code expects
+---(edited by hand, or by a newer version), instead of failing later on a nil.
+function M.check(data, file)
+  local function bad(why)
+    error(string.format("cannot read %s: %s", file or "the comments file", why), 0)
+  end
+  if type(data.threads) ~= "table" or (next(data.threads) ~= nil and not vim.islist(data.threads)) then
+    bad("`threads` is not a list")
+  end
+  for i, t in ipairs(data.threads) do
+    local name = type(t) == "table" and type(t.id) == "string" and t.id or ("#" .. i)
+    if type(t) ~= "table" then
+      bad("thread " .. name .. " is not an object")
+    elseif type(t.id) ~= "string" then
+      bad("thread " .. name .. " has no id")
+    elseif type(t.file) ~= "string" then
+      bad("thread " .. name .. " has no file")
+    elseif type(t.range) ~= "table" or type(t.range.start) ~= "number" or type(t.range["end"]) ~= "number" then
+      bad("thread " .. name .. " has no range")
+    elseif type(t.messages) ~= "table" then
+      bad("thread " .. name .. " has no messages")
+    end
+  end
+end
+
+---Write to a temporary file, flush it to disk, then rename it over the store:
+---a failure (disk full, quota) leaves the old file as it was.
 local function write(root, data)
   local _, file = M.paths(root)
   local tmp = file .. ".tmp." .. uv.os_getpid()
-  local f = assert(io.open(tmp, "w"))
-  f:write(M.encode(data), "\n")
-  f:close()
-  assert(uv.fs_rename(tmp, file))
+  local text = M.encode(data) .. "\n"
+  local fd, err = uv.fs_open(tmp, "w", 420)
+  if not fd then
+    error("cannot save " .. file .. ": " .. tostring(err), 0)
+  end
+  local n, werr = uv.fs_write(fd, text)
+  local synced, serr = uv.fs_fsync(fd)
+  uv.fs_close(fd)
+  if n ~= #text or not synced then
+    uv.fs_unlink(tmp)
+    error("cannot save " .. file .. ": " .. tostring(werr or serr or "short write (disk full?)"), 0)
+  end
+  local ok, rerr = uv.fs_rename(tmp, file)
+  if not ok then
+    uv.fs_unlink(tmp)
+    error("cannot save " .. file .. ": " .. tostring(rerr), 0)
+  end
 end
 
 local LOCK_TIMEOUT_MS = 5000
-local LOCK_STALE_S = 10
+local LOCK_STALE_S = 10 -- a lock with no pid in it
+local LOCK_ABANDONED_S = 60 -- a lock whose process is still there
+
+local function lock_owner(lock)
+  local f = io.open(lock, "r")
+  if not f then
+    return nil
+  end
+  local pid = tonumber(f:read("a") or "")
+  f:close()
+  return pid
+end
+
+---Whether the lock was left behind: its process is gone, or it is far older
+---than any update takes (the pid may have been reused, or is on another host).
+local function stale(lock)
+  local st = uv.fs_stat(lock)
+  if not st then
+    return false
+  end
+  local age = os.time() - st.mtime.sec
+  local pid = lock_owner(lock)
+  if pid and age >= 1 then -- give a new lock a moment to get its pid written
+    local alive, _, name = uv.kill(pid, 0)
+    if not alive and name == "ESRCH" then
+      return true
+    end
+  end
+  return age > (pid and LOCK_ABANDONED_S or LOCK_STALE_S)
+end
 
 local function acquire(lock)
   local deadline = uv.hrtime() + LOCK_TIMEOUT_MS * 1e6
   while true do
-    local fd = uv.fs_open(lock, "wx", 420)
+    local fd, err, name = uv.fs_open(lock, "wx", 420)
     if fd then
       uv.fs_write(fd, tostring(uv.os_getpid()))
       uv.fs_close(fd)
       return
     end
-    local st = uv.fs_stat(lock)
-    if st and os.time() - st.mtime.sec > LOCK_STALE_S then
+    if name ~= "EEXIST" then -- read-only directory, disk full: waiting will not help
+      error("cannot lock " .. lock .. ": " .. tostring(err), 0)
+    end
+    if stale(lock) then
       uv.fs_unlink(lock)
     elseif uv.hrtime() > deadline then
-      error("code-review: timed out waiting for lock " .. lock, 0)
+      error(string.format("timed out waiting for lock %s (held by process %s); try again", lock, lock_owner(lock) or "?"), 0)
     else
       uv.sleep(15)
     end
+  end
+end
+
+---Remove the lock if it is still ours (it may have been taken over).
+local function release(lock)
+  if lock_owner(lock) == uv.os_getpid() then
+    uv.fs_unlink(lock)
   end
 end
 
@@ -188,7 +269,7 @@ function M.update(root, fn)
     write(root, data)
     return r
   end)
-  uv.fs_unlink(lock)
+  release(lock)
   if not ok then
     error(res, 0)
   end
