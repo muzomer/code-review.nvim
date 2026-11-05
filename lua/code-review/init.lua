@@ -706,10 +706,15 @@ local function unwatch(root)
 end
 
 local watch_failed = false -- warned once that live updates are off
+local watch_failed_at = {} -- root -> when watching it last failed: not retried on every render
+local WATCH_RETRY_S = 60
 
 function M.watch(root)
   local w = watchers[root]
   if w and not w.dead then
+    return
+  end
+  if watch_failed_at[root] and os.time() - watch_failed_at[root] < WATCH_RETRY_S then
     return
   end
   unwatch(root) -- the directory was deleted: watch the new one
@@ -747,6 +752,7 @@ function M.watch(root)
       pcall(handle.close, handle)
     end
     pcall(timer.close, timer)
+    watch_failed_at[root] = os.time()
     if not watch_failed then
       watch_failed = true
       notify("cannot watch " .. dir .. " (" .. tostring(err) .. "); agent replies show after your next action",
@@ -754,6 +760,7 @@ function M.watch(root)
     end
     return
   end
+  watch_failed_at[root] = nil
   watchers[root] = { handle = handle, timer = timer }
 end
 
