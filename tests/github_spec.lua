@@ -141,6 +141,33 @@ describe("github.get retries", function()
     github.run, github.retry_delay_ms = old_run, old_delay
   end)
 
+  it("retries network failures and timeouts, but not a missing curl", function()
+    local old_run, old_delay = github.run, github.retry_delay_ms
+    vim.env.GH_TOKEN = "t"
+    github.retry_delay_ms = 1
+    local calls = 0
+    github.run = function()
+      calls = calls + 1
+      if calls == 1 then
+        return { code = 28, stdout = "", stderr = "Operation timed out" }
+      elseif calls == 2 then
+        return { code = 56, stdout = "", stderr = "Connection reset" }
+      end
+      return { code = 0, stdout = '{"ok":true}\n200', stderr = "" }
+    end
+    local data = github.get("github.com", "/x")
+    eq({ data and data.ok, calls }, { true, 3 })
+    calls = 0
+    github.run = function()
+      calls = calls + 1
+      return { code = -1, stdout = "", stderr = "ENOENT: curl" }
+    end
+    local _, err = github.get("github.com", "/x")
+    eq(calls, 1)
+    assert(err:find("curl failed", 1, true), err)
+    github.run, github.retry_delay_ms = old_run, old_delay
+  end)
+
   it("gives up after the retry budget and says what happened", function()
     local old_run, old_delay = github.run, github.retry_delay_ms
     vim.env.GH_TOKEN = "t"

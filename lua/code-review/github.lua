@@ -59,6 +59,10 @@ end
 -- Auth + HTTP -----------------------------------------------------------------
 
 local gh_token -- `gh auth token` spawns a process: ask once per Neovim/CLI run
+-- A failure is remembered only briefly: `gh auth login` must work without a
+-- restart, but each call must not block Neovim on `gh` again.
+local gh_failed_at
+local GH_RETRY_S = 30
 
 ---Token from $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`.
 ---@return string? token
@@ -69,18 +73,19 @@ function M.token()
       return v
     end
   end
-  if gh_token == nil and vim.fn.executable("gh") == 1 then
+  local recently_failed = gh_failed_at and os.time() - gh_failed_at < GH_RETRY_S
+  if gh_token == nil and not recently_failed and vim.fn.executable("gh") == 1 then
     local res = M.run({ "gh", "auth", "token" })
     local t = res.code == 0 and vim.trim(res.stdout or "") or ""
-    -- a failure is not remembered: `gh auth login` must work without a restart
     gh_token = t ~= "" and t or nil
+    gh_failed_at = not gh_token and os.time() or nil
   end
-  return gh_token or nil
+  return gh_token
 end
 
----Forget the memoized `gh` token (tests).
+---Forget the memoized `gh` token, and a recent failure to get one (tests).
 function M.reset_token()
-  gh_token = nil
+  gh_token, gh_failed_at = nil, nil
 end
 
 local function api_base(host)
@@ -108,9 +113,20 @@ local function http_status(res)
   return tonumber(((res and res.stdout or ""):match("\n(%d+)$")))
 end
 
+-- curl exits that a second try can fix: cannot resolve / connect, timed out,
+-- TLS handshake failed, empty reply, connection reset. A missing curl (-1) or a
+-- bad request is not among them.
+local CURL_RETRY = { [6] = true, [7] = true, [28] = true, [35] = true, [52] = true, [56] = true }
+
 local function transient(res)
+  if res == nil then
+    return false
+  end
+  if res.code ~= 0 then
+    return CURL_RETRY[res.code] == true
+  end
   local status = http_status(res)
-  return res ~= nil and res.code == 0 and (status == 502 or status == 503 or status == 504)
+  return status == 502 or status == 503 or status == 504
 end
 
 ---Turn a finished curl run into the body, or nil + error.
@@ -147,7 +163,8 @@ local function interpret(res, path, opts)
   return data
 end
 
----GET `path` from the API of `host`. Transient 502/503/504 are retried.
+---GET `path` from the API of `host`. Transient failures (502/503/504, network
+---errors, timeouts) are retried.
 ---@param opts? { raw?: boolean } raw = file contents instead of JSON
 ---@return any? body decoded JSON (or the raw string), nil when not found
 ---@return string? err

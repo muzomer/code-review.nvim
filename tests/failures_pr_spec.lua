@@ -177,7 +177,7 @@ describe("PR failures", function()
   end)
 
   it("a PR reviewed before opens from disk when GitHub cannot be reached", function()
-    with({}, function(notes)
+    with({ { github, "retry_delay_ms", 1 } }, function(notes)
       fake(pr_routes(906, { { filename = "a.txt", status = "modified" }, { filename = "zz.dat", status = "modified" } }, {
         ["contents/a.txt?ref=B906"] = "a0\n", ["contents/a.txt?ref=H906"] = "a1\n",
       })) -- zz.dat has no text: the review is never "complete"
@@ -185,6 +185,7 @@ describe("PR failures", function()
       diff.close()
       github.run = function() return { code = 6, stdout = "", stderr = "curl: (6) Could not resolve host" } end
       diff.open("acme/fail#906")
+      vim.wait(2000, function() return not diff.loading(root) end, 5) -- a lost network is retried first
       eq(diff.loading(root), false)
       assert(find(notes, "showing your saved copy"), vim.inspect(notes))
       local names = vim.tbl_map(function(w) return api.nvim_buf_get_name(api.nvim_win_get_buf(w)) end, api.nvim_tabpage_list_wins(0))
@@ -231,10 +232,16 @@ describe("PR failures", function()
     vim.env.GH_TOKEN, vim.env.GITHUB_TOKEN = nil, nil
     github.reset_token()
     with({ { vim.fn, "executable", function() return 1 end } }, function()
-      github.run = function() return { code = 1, stdout = "", stderr = "not logged in" } end
-      eq(github.token(), nil)
-      github.run = function() return { code = 0, stdout = "tok\n", stderr = "" } end
-      eq(github.token(), "tok")
+      local calls, now = 0, 1000
+      with({ { os, "time", function() return now end } }, function()
+        github.run = function() calls = calls + 1 return { code = 1, stdout = "", stderr = "not logged in" } end
+        eq(github.token(), nil)
+        eq(github.token(), nil) -- not asked again straight away: `gh` blocks Neovim
+        eq(calls, 1)
+        github.run = function() return { code = 0, stdout = "tok\n", stderr = "" } end
+        now = now + 60
+        eq(github.token(), "tok")
+      end)
     end)
     vim.env.GH_TOKEN, vim.env.GITHUB_TOKEN = saved[1], saved[2]
     github.reset_token()
