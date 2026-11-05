@@ -13,6 +13,12 @@ vim.env.NVIM_CODE_REVIEW_CACHE = sandbox .. "/cache"
 require("code-review.headless").available = function()
   return false
 end
+-- Never type into a real herdr pane (tests run inside one, and their prompts
+-- would land in a live agent); specs that need herdr fake poke.run.
+vim.env.HERDR_SOCKET_PATH, vim.env.HERDR_PANE_ID = nil, nil
+require("code-review.poke").run = function(args)
+  error("a test called the real herdr: " .. table.concat(args, " "))
+end
 
 local passed, failed, prefix = 0, 0, ""
 

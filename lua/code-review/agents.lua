@@ -9,7 +9,8 @@
 --   preset_id  the session id can be chosen up front (else it is read from the output)
 --   fork       a session can be copied, so a poke can answer from a fork of it
 --   subagents  the agent can hand work to a subagent (prompt wording)
---   args(o)    the command line; o = { cmd, prompt, cwd, new_id?, resume?, fork?, dirs, cfg }
+--   args(o)    the command line; o = { cmd, prompt, cwd, new_id?, resume?, fork?, dirs, cfg, edit? }
+--              (edit: a local review, where the agent should change the code)
 --   parse(ev)  one decoded JSON line -> { lines?, append?, session_id?, done?, error?, cost? }
 --   chat(id)   command line of an interactive terminal on that session
 --
@@ -38,6 +39,13 @@ local function tool_line(name, input)
   return string.format("→ %s %s", name or "tool", one_line(what, 120))
 end
 
+-- The CLI of this checkout. Background agents get its directory on PATH and
+-- may run it by full path too: an agent that saw the path in its session
+-- tends to use it, and a call it is not allowed to make cannot be approved by
+-- anyone in a background run.
+local here = debug.getinfo(1, "S").source:sub(2)
+M.BIN = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(vim.fn.fnamemodify(here, ":p"))))) .. "/bin"
+
 M.claude = {
   name = "Claude Code",
   cmd = "claude",
@@ -45,6 +53,7 @@ M.claude = {
   fork = true,
   subagents = true,
   DEFAULT_TOOLS = { "Bash(code-review:*)", "Read", "Grep", "Glob" },
+  EDIT_TOOLS = { "Edit", "Write" }, -- added for local reviews (not PRs)
   args = function(o)
     local c = o.cfg
     local args = { o.cmd, "-p", o.prompt, "--output-format", "stream-json", "--verbose" }
@@ -55,7 +64,15 @@ M.claude = {
     else
       vim.list_extend(args, { "--session-id", o.new_id })
     end
-    local tools = c.allowed_tools or M.claude.DEFAULT_TOOLS
+    local tools = c.allowed_tools
+    if not tools then
+      tools = vim.list_extend(vim.deepcopy(M.claude.DEFAULT_TOOLS), { "Bash(" .. M.BIN .. "/code-review:*)" })
+      if o.edit then
+        -- the prompt asks for the changes the comments request; Claude only
+        -- edits inside its directory and the --add-dir ones
+        vim.list_extend(tools, M.claude.EDIT_TOOLS)
+      end
+    end
     if #tools > 0 then
       args[#args + 1] = "--allowedTools"
       vim.list_extend(args, tools)

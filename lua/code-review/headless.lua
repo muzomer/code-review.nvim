@@ -109,12 +109,18 @@ function M.args(root, text, opts)
   local dirs = {}
   -- the snapshots of a PR review live in the cache, outside the session root
   local s = require("code-review.session").load(root)
-  if s and s.kind == "pr" and s.cache then
+  local pr = s and s.kind == "pr"
+  if pr and s.cache then
     dirs[1] = s.cache
   end
+  local cwd = opts.cwd or root
+  if not pr and vim.fs.normalize(cwd) ~= vim.fs.normalize(root) then
+    dirs[#dirs + 1] = root -- a fork runs where its session started: give it the reviewed project
+  end
   local args = a.args({
-    cmd = M.command(opts.agent), prompt = text, cwd = opts.cwd or root, dirs = dirs, cfg = cfg(),
+    cmd = M.command(opts.agent), prompt = text, cwd = cwd, dirs = dirs, cfg = cfg(),
     new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
+    edit = not pr, -- a local review asks for code changes; a PR has no checkout to change
   })
   vim.list_extend(args, cfg().args or {})
   return args
@@ -165,10 +171,11 @@ end
 ---Start a process, calling `on_line` for each line of stdout and `on_exit` at
 ---the end, both on the main loop. Replaceable in tests.
 ---@return { kill: fun() }
-M.spawn = function(args, cwd, on_line, on_exit)
+M.spawn = function(args, cwd, on_line, on_exit, env)
   local pending = ""
   local h = vim.system(args, {
     cwd = cwd,
+    env = vim.tbl_extend("force", env or {}, { PATH = agents.BIN .. ":" .. (vim.env.PATH or "") }), -- `code-review` always resolves
     text = true,
     stdin = "",
     stdout = function(_, data)
@@ -190,7 +197,11 @@ M.spawn = function(args, cwd, on_line, on_exit)
     end,
   }, function(res)
     vim.schedule(function()
-      on_exit(res.code, res.stderr or "")
+      if pending ~= "" then -- a last line without a newline (often the result)
+        on_line(pending)
+        pending = ""
+      end
+      on_exit(res.code, res.stderr or "", res.signal)
     end)
   end)
   return {
@@ -235,12 +246,11 @@ start = function(root, text, on_start, retried, fork)
     or ("new session" .. (new_id and (" " .. new_id) or ""))
   push(run, { string.format("● %s · %s", a.name, first) })
   local cwd = fork and fork.cwd or root -- agents file sessions by the directory they started in
-  local args = M.args(root, text, { resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent, cwd = cwd })
   local partial -- text streamed in pieces (delta events), shown as it grows
   local function flush()
     partial = nil
   end
-  run.handle = M.spawn(args, cwd, function(line)
+  local function on_line(line)
     local ok, event = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
     if not ok or type(event) ~= "table" then
       flush()
@@ -272,11 +282,16 @@ start = function(root, text, on_start, retried, fork)
     if r.done then
       run.result = r
     end
-  end, function(code, stderr)
+  end
+  local function on_exit(code, stderr, signal)
     if runs[root] ~= run then
       return -- replaced (restarted) meanwhile
     end
     local r = run.result
+    if signal and signal ~= 0 and not (r and r.done) then
+      code = code ~= 0 and code or 128 + signal -- killed (OOM, pkill): not "done"
+      stderr = (stderr ~= "" and stderr or "") .. " killed by signal " .. signal
+    end
     if code == 0 and not (r and r.error) then
       run.status = "done"
       push(run, { "✓ done" .. (r and r.cost and string.format(" · $%.2f", r.cost) or "") })
@@ -288,16 +303,40 @@ start = function(root, text, on_start, retried, fork)
       -- the saved session is gone (deleted, or never written): start a new one once
       if saved and not retried and a.lost_session and a.lost_session(err) then
         M.forget(root)
-        return start(root, text, on_start, true)
+        local again = start(root, text, on_start, true)
+        if again then
+          again.queued = run.queued -- a poke that waited for this run still waits
+        end
+        return
       end
       run.status, run.error = "failed", one_line(err, 200)
       push(run, { "✗ " .. run.error })
+      if require("code-review").config.progress == false then -- nothing else reports it
+        notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
+      end
     end
     local q = run.queued
     if q then
       start(root, q.text, q.on_start, nil, q.fork)
     end
+  end
+  -- M.args (a bad config.headless.args) and vim.system (missing command or
+  -- directory) can throw: the run must not stay "working" then
+  local spawned, handle = pcall(function()
+    local args = M.args(root, text, { resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent, cwd = cwd })
+    -- a fork runs where its session started: point the CLI at this project anyway
+    return M.spawn(args, cwd, on_line, on_exit, { NVIM_CODE_REVIEW_ROOT = root })
   end)
+  if not spawned then -- vim.system throws when the command or its directory is missing
+    if new_id then
+      M.forget(root) -- that session was never created
+    end
+    run.status, run.error = "failed", one_line(tostring(handle), 200)
+    push(run, { "✗ " .. run.error })
+    notify(string.format("could not start %s: %s", a.name, run.error), vim.log.levels.ERROR)
+    return nil
+  end
+  run.handle = handle
   if on_start then
     on_start()
   end
@@ -331,9 +370,29 @@ function M.send(root, text, on_start, opts)
     runs[root] = nil -- restart: the exit handler of the old run sees it was replaced
     run.handle.kill()
   end
-  start(root, text, on_start, nil, opts.fork)
+  if not start(root, text, on_start, nil, opts.fork) then
+    return false, false -- could not start (already reported)
+  end
   return true, true
 end
+
+---Stop every background agent still working (Neovim is quitting: a run left
+---behind would keep editing files and replying with nobody watching).
+function M.stop_all()
+  for root, run in pairs(runs) do
+    if run.status == "working" and run.handle then
+      runs[root] = nil
+      run.handle.kill()
+    end
+  end
+end
+
+api.nvim_create_autocmd("VimLeavePre", {
+  group = api.nvim_create_augroup("code-review-headless", { clear = true }),
+  callback = function()
+    M.stop_all()
+  end,
+})
 
 ---Stop the background agent of this review (the session is kept).
 function M.stop(root)
@@ -357,9 +416,16 @@ function M.chat(root)
   if M.running(root) then
     return notify("the background agent is still working; wait until it is done (or :CodeReview stop)", vim.log.levels.WARN)
   end
+  if chats[root] then
+    return notify("this review's agent is already open in a chat", vim.log.levels.WARN)
+  end
+  if not M.available() then
+    return notify(M.command() .. " not found; set config.headless.cmd", vim.log.levels.ERROR)
+  end
   vim.cmd("botright vsplit")
+  local win = api.nvim_get_current_win()
   local buf = api.nvim_create_buf(false, true)
-  api.nvim_win_set_buf(0, buf)
+  api.nvim_win_set_buf(win, buf)
   local opts = {
     cwd = root,
     on_exit = function()
@@ -367,15 +433,16 @@ function M.chat(root)
     end,
   }
   local cmd = M.adapter().chat(M.command(), id)
-  local job
+  local ok, job
   if vim.fn.has("nvim-0.11") == 1 then
     opts.term = true
-    job = vim.fn.jobstart(cmd, opts)
+    ok, job = pcall(vim.fn.jobstart, cmd, opts)
   else
-    job = vim.fn.termopen(cmd, opts) -- Neovim 0.10: jobstart() has no `term` yet
+    ok, job = pcall(vim.fn.termopen, cmd, opts) -- Neovim 0.10: jobstart() has no `term` yet
   end
-  if job <= 0 then
-    return notify("could not start " .. M.command(), vim.log.levels.ERROR)
+  if not ok or job <= 0 then
+    pcall(api.nvim_win_close, win, true) -- no empty split left behind
+    return notify("could not start " .. M.command() .. (ok and "" or (": " .. tostring(job))), vim.log.levels.ERROR)
   end
   chats[root] = job
   vim.cmd.startinsert()

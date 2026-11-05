@@ -13,8 +13,23 @@ local store = require("code-review.store")
 local M = {}
 
 ---Replaceable in tests: fun(args: string[]): { code: integer, stdout: string, stderr: string }
+M.TIMEOUT_MS = 8000
+
+---Why a herdr call failed, from its result: a timeout says so instead of "".
+local function failure(res)
+  if res.code == 124 or (res.signal == 15 and (res.stderr or "") == "") then
+    return string.format("herdr did not answer within %ds", M.TIMEOUT_MS / 1000)
+  end
+  local err = vim.trim(res.stderr or "")
+  return err ~= "" and err or vim.trim(res.stdout or "") ~= "" and vim.trim(res.stdout) or ("herdr exited with " .. tostring(res.code))
+end
+
 M.run = function(args)
-  return vim.system(args, { text = true }):wait(8000)
+  local ok, obj = pcall(vim.system, args, { text = true }) -- throws when herdr is not installed
+  if not ok then
+    return { code = -1, stdout = "", stderr = tostring(obj) }
+  end
+  return obj:wait(M.TIMEOUT_MS)
 end
 
 local default_run = M.run
@@ -25,11 +40,16 @@ function M.run_async(args, cb)
   if M.run ~= default_run then
     return cb(M.run(args))
   end
-  vim.system(args, { text = true }, function(res)
+  local ok, err = pcall(vim.system, args, { text = true, timeout = M.TIMEOUT_MS }, function(res)
     vim.schedule(function()
       cb(res)
     end)
   end)
+  if not ok then -- herdr not installed: answer like a failed run, so callers clean up
+    vim.schedule(function()
+      cb({ code = -1, stdout = "", stderr = tostring(err) })
+    end)
+  end
 end
 
 local function notify(msg, level)
@@ -80,7 +100,10 @@ local function decode(res)
     return data.result or data
   end
   if res.code ~= 0 then
-    return nil, vim.trim((res.stderr or "") ~= "" and res.stderr or (res.stdout or "herdr failed"))
+    return nil, failure(res)
+  end
+  if vim.trim(res.stdout or "") ~= "" then -- not JSON: do not take it for a success
+    return nil, "herdr printed something unexpected: " .. vim.split(vim.trim(res.stdout), "\n")[1]:sub(1, 120)
   end
   return {}
 end
@@ -122,9 +145,11 @@ local function headless_target(root)
   return { pane_id = M.HEADLESS, title = vim.fs.basename(headless.command()) .. " (background)" .. what }
 end
 
----Let the user choose the agent to poke and remember the choice. Besides the
----agents running in herdr, the list offers this review's background agent.
----@param on_pick fun(target: table)
+---Let the user choose the agent to poke. Besides the agents running in herdr,
+---the list offers this review's background agent. The choice is remembered
+---once `on_pick` reports the poke went through, so a broken agent is not
+---tried again on every poke.
+---@param on_pick fun(target: table): boolean? ok
 function M.pick(root, on_pick)
   local headless = require("code-review.headless")
   local agents, err = {}, nil
@@ -137,9 +162,11 @@ function M.pick(root, on_pick)
   end
   if headless.available() and require("code-review").config.agent ~= "herdr" then
     local h = headless_target(root)
-    if #agents == 0 then -- nothing to choose from
-      save_target(root, h)
-      return on_pick(h)
+    if #agents == 0 and not err then -- nothing to choose from
+      if on_pick(h) then
+        save_target(root, h)
+      end
+      return
     end
     h.status = headless.session_id(root) and "resume" or "new"
     h.cwd = "runs without a terminal"
@@ -148,17 +175,17 @@ function M.pick(root, on_pick)
   if #agents == 0 then
     return notify("no other agent is running in herdr", vim.log.levels.WARN)
   end
+  local resume = require("code-review").suspend_thread() -- the picker would overlap it
   vim.ui.select(agents, {
     prompt = "Poke which agent?",
     format_item = function(a)
       return string.format("%-40s %-8s %s", a.title, a.status, a.cwd)
     end,
   }, function(choice)
-    if not choice then
-      return
+    resume()
+    if choice and on_pick(choice) then
+      save_target(root, choice)
     end
-    save_target(root, choice)
-    on_pick(choice)
   end)
 end
 
@@ -290,30 +317,36 @@ function M.send(root, opts)
     if started then
       notify("poked " .. target.title)
     end
+    return accepted
   end
   local function go(target)
     if target.pane_id == M.HEADLESS then
-      local text, sent = prompt.build(root, { style = "background", author = (require("code-review").config.headless or {}).agent or "claude" })
+      local text, sent = prompt.build(root, { style = "background", cwd = root, author = (require("code-review").config.headless or {}).agent or "claude" })
       return background(text, sent, target)
     end
     local adapter = require("code-review.agents").get(target.agent or "claude")
     if isolate == "fork" and adapter and adapter.fork and headless.available(target.agent or "claude") then
       local fork = M.session_of(target)
       if fork then
-        local text, sent = prompt.build(root, { style = "fork", author = target.agent or "claude" })
+        local text, sent = prompt.build(root, { style = "fork", cwd = fork.cwd, author = target.agent or "claude" })
         return background(text, sent, { pane_id = M.HEADLESS, title = target.title .. " (fork)" }, fork)
       end
+      notify(string.format("could not find the session of %s to fork; typing the prompt into its pane instead", target.title),
+        vim.log.levels.WARN)
     end
     local style = isolate and adapter and adapter.subagents and "subagent" or "plain"
-    local text, sent = prompt.build(root, { style = style })
+    local text, sent = prompt.build(root, { style = style, cwd = target.dir })
     local before = M.snapshot(target.pane_id) -- taken before submitting, so nothing is missed
     local ok, err = M.submit(target.pane_id, text)
     if ok then
       prompt.mark_sent(root, sent)
       notify("poked " .. target.title)
-      return follow(target, before)
+      follow(target, before)
+      return true
     end
-    notify(string.format("could not poke %s: %s", target.title, tostring(err)), vim.log.levels.ERROR)
+    notify(string.format("could not poke %s: %s · :CodeReview poke pick to choose another agent", target.title, tostring(err)),
+      vim.log.levels.ERROR)
+    return false
   end
   if mode == "headless" or (mode == "auto" and not M.available() and headless.available()) then
     if not headless.available() then
@@ -332,7 +365,10 @@ function M.send(root, opts)
     if saved.pane_id == M.HEADLESS and headless.available() then
       return go(headless_target(root))
     end
-    local agents = M.agents() or {}
+    local agents, err = M.agents()
+    if not agents then -- herdr hiccup: the agent may well be there; ask again next time
+      return notify("cannot list agents: " .. tostring(err), vim.log.levels.ERROR)
+    end
     for _, a in ipairs(agents) do
       if a.pane_id == saved.pane_id then
         return go(a) -- the live record: its session may have changed

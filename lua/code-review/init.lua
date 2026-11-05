@@ -92,7 +92,7 @@ M.config = {
   headless = { -- the background agent: one resumable conversation per review
     agent = "claude", -- "claude", "codex", "opencode" or "gemini"
     cmd = nil, -- its executable (default: the agent's own: claude, codex, opencode, gemini)
-    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob; add "Edit" etc. to let it change local code
+    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob, plus Edit/Write in a local review (not a PR)
     permission_mode = nil, -- claude: --permission-mode (e.g. "acceptEdits"); codex: --sandbox (default "workspace-write");
     -- gemini: --approval-mode (e.g. "yolo" to let it run the CLI); opencode: "auto" = --auto
     args = {}, -- extra arguments for every run
@@ -428,11 +428,16 @@ end
 
 local lost = {} -- buf -> { [thread id] = true } code deleted, not yet saved
 
+---store.update that reports a failure instead of raising it.
+---@return boolean ok
+---@return any result of fn
 local function try_update(root, fn)
-  local ok, err = pcall(store.update, root, fn)
+  local ok, res = pcall(store.update, root, fn)
   if not ok then
-    notify(err, vim.log.levels.ERROR)
+    notify(res, vim.log.levels.ERROR)
+    return false
   end
+  return true, res
 end
 
 ---Where the extmarks say each tracked thread is now (1-based), or false when
@@ -690,10 +695,24 @@ local function on_store_changed(root)
   end
 end
 
+local function unwatch(root)
+  local w = watchers[root]
+  if w then
+    watchers[root] = nil
+    pcall(w.handle.stop, w.handle)
+    pcall(w.handle.close, w.handle)
+    pcall(w.timer.close, w.timer)
+  end
+end
+
+local watch_failed = false -- warned once that live updates are off
+
 function M.watch(root)
-  if watchers[root] then
+  local w = watchers[root]
+  if w and not w.dead then
     return
   end
+  unwatch(root) -- the directory was deleted: watch the new one
   local dir = store.paths(root)
   if vim.fn.isdirectory(dir) == 0 then
     return
@@ -704,21 +723,44 @@ function M.watch(root)
     seen[root][t.id] = #t.messages
   end
   local handle, timer = uv.new_fs_event(), uv.new_timer()
-  handle:start(dir, {}, function(err, fname)
-    if err or (fname and fname ~= store.FILE) then
-      return
+  local started, err = false, "out of inotify watches?"
+  if handle then
+    started, err = handle:start(dir, {}, function(e, fname)
+      if e or not uv.fs_stat(dir) then -- (a fast callback: no vim.fn here)
+        -- deleted (or the watch broke): the next write watches again
+        if watchers[root] then
+          watchers[root].dead = true
+        end
+        return
+      end
+      if fname and fname ~= store.FILE then
+        return
+      end
+      timer:stop()
+      timer:start(80, 0, vim.schedule_wrap(function()
+        on_store_changed(root)
+      end))
+    end)
+  end
+  if not started then
+    if handle then
+      pcall(handle.close, handle)
     end
-    timer:stop()
-    timer:start(80, 0, vim.schedule_wrap(function()
-      on_store_changed(root)
-    end))
-  end)
+    pcall(timer.close, timer)
+    if not watch_failed then
+      watch_failed = true
+      notify("cannot watch " .. dir .. " (" .. tostring(err) .. "); agent replies show after your next action",
+        vim.log.levels.WARN)
+    end
+    return
+  end
   watchers[root] = { handle = handle, timer = timer }
 end
 
 -- Floats ------------------------------------------------------------------------
 
----@param on_submit fun(text: string, poke: boolean) poke = sent with <M-s>: also poke the agent
+---@param on_submit fun(text: string, poke: boolean): boolean? poke = sent with <M-s>: also poke
+---the agent. Returning false (not saved) opens the box again with the text.
 ---@param initial? string text to start from (editing)
 ---Footer of the comment box: its keys, as configured.
 function M.input_footer()
@@ -774,8 +816,8 @@ local function input(title, on_submit, initial)
   local function submit(alt)
     local text = vim.trim(table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
     close()
-    if text ~= "" then
-      on_submit(text, (alt == true) ~= (M.config.auto_poke == true))
+    if text ~= "" and on_submit(text, (alt == true) ~= (M.config.auto_poke == true)) == false then
+      input(title, on_submit, text) -- not saved: keep what was typed
     end
   end
   local o = { buffer = buf, nowait = true }
@@ -1046,6 +1088,25 @@ function M.open_thread(root, tid, refresh)
   end
 end
 
+---Close the thread window for a while (e.g. while a picker is up, so the two
+---floats do not overlap). Returns a function that brings it back.
+---@return fun()
+function M.suspend_thread()
+  if not (float and api.nvim_win_is_valid(float.win)) then
+    return function() end
+  end
+  local f = float
+  api.nvim_win_close(f.win, true)
+  return function()
+    -- scheduled: the picker may still be closing when it calls back
+    vim.schedule(function()
+      if not (float and api.nvim_win_is_valid(float.win)) then
+        M.open_thread(f.root, f.tid)
+      end
+    end)
+  end
+end
+
 ---Re-render every loaded buffer and the open thread window.
 function M.refresh_views()
   for _, b in ipairs(api.nvim_list_bufs()) do
@@ -1307,8 +1368,8 @@ function M.help(context)
   for _, l in ipairs(lines) do
     width = math.max(width, vim.fn.strdisplaywidth(l))
   end
-  width = math.min(width + 2, vim.o.columns - 4)
-  local height = math.min(#lines, vim.o.lines - 4)
+  width = math.max(1, math.min(width + 2, vim.o.columns - 4))
+  local height = math.max(1, math.min(#lines, vim.o.lines - 4)) -- a tiny screen still gets a window
   local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -1317,8 +1378,8 @@ function M.help(context)
     relative = "editor",
     width = width,
     height = height,
-    row = math.floor((vim.o.lines - height) / 2) - 1,
-    col = math.floor((vim.o.columns - width) / 2),
+    row = math.max(0, math.floor((vim.o.lines - height) / 2) - 1),
+    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
     style = "minimal",
     border = "rounded",
     title = " code-review keys · q to close ",
@@ -1446,9 +1507,12 @@ function M.add(line1, line2)
     notify("buffer has unsaved changes; save it so agents see the same code", vim.log.levels.WARN)
   end
   if side == "both" then -- unified view: rows → the side and lines they show
+    local why
     side, line1, line2 = require("code-review.unified").translate(buf, line1, line2)
     if not side then
-      return notify("this line only existed in your last review; comment on the current code", vim.log.levels.WARN)
+      why = line1 -- translate's reason, when it has one
+      return notify(type(why) == "string" and why or "this line only existed in your last review; comment on the current code",
+        vim.log.levels.WARN)
     end
   end
   -- the anchor is taken from the text of that side (a unified buffer mixes both)
@@ -1458,7 +1522,7 @@ function M.add(line1, line2)
   local base = side == "old" and pr and pr.base_sha or nil
   local where = side == "old" and " (old side)" or ""
   input(string.format("Comment on %s:%d-%d%s", rel, line1, line2, where), function(body, now)
-    local tid = store.update(root, function(data)
+    local saved, tid = try_update(root, function(data)
       return store.add_thread(data, {
         file = rel,
         side = side,
@@ -1470,25 +1534,40 @@ function M.add(line1, line2)
         body = body,
       })
     end)
+    if not saved then
+      return false
+    end
     after_write(root)
-    maybe_poke(root, now)
+    -- open the thread first: a poke that asks which agent hides it while the
+    -- picker is up, and brings it back afterwards
     if now and M.config.open_after_send and tid then
       M.open_thread(root, tid)
     end
+    maybe_poke(root, now)
   end)
 end
 
 function M.reply(root, tid)
   input("Reply to " .. tid, function(body, now)
-    store.update(root, function(data)
+    local gone
+    local saved = try_update(root, function(data)
       local t = store.find(data, tid)
-      if t then
-        store.add_message(t, "user", body)
-        if t.status == "resolved" then
-          t.status = "open"
-        end
+      if not t then
+        gone = true -- deleted meanwhile (by the agent, or in another window)
+        return store.UNCHANGED
+      end
+      store.add_message(t, "user", body)
+      if t.status == "resolved" then
+        t.status = "open"
       end
     end)
+    if not saved then
+      return false
+    end
+    if gone then
+      vim.fn.setreg('"', body)
+      return notify(tid .. " was deleted; your reply is in the \" register", vim.log.levels.WARN)
+    end
     after_write(root)
     maybe_poke(root, now)
   end)
@@ -1507,7 +1586,7 @@ function M.edit(root, tid)
   end
   input("Edit your comment (" .. tid .. ")", function(body, now)
     local refused
-    try_update(root, function(d)
+    local saved = try_update(root, function(d)
       local t2 = store.find(d, tid)
       if not t2 then
         return store.UNCHANGED
@@ -1521,8 +1600,12 @@ function M.edit(root, tid)
         return store.UNCHANGED
       end
     end)
+    if not saved then
+      return false
+    end
     if refused then
-      notify("not saved: " .. refused, vim.log.levels.WARN)
+      vim.fn.setreg('"', body)
+      notify("not saved: " .. refused .. "; your text is in the \" register", vim.log.levels.WARN)
     end
     after_write(root)
     if not refused then
@@ -1532,12 +1615,14 @@ function M.edit(root, tid)
 end
 
 function M.toggle_resolved(root, tid)
-  store.update(root, function(data)
+  if not try_update(root, function(data)
     local t = store.find(data, tid)
     if t then
       t.status = t.status == "resolved" and "open" or "resolved"
     end
-  end)
+  end) then
+    return
+  end
   -- reopened threads may no longer match the code
   for _, buf in ipairs(api.nvim_list_bufs()) do
     if api.nvim_buf_is_loaded(buf) and buf_info(buf) == root then
@@ -1551,12 +1636,14 @@ function M.delete(root, tid)
   if vim.fn.confirm("Delete thread " .. tid .. "?", "&Yes\n&No", 2) ~= 1 then
     return
   end
-  store.update(root, function(data)
+  if not try_update(root, function(data)
     local _, i = store.find(data, tid)
     if i then
       table.remove(data.threads, i)
     end
-  end)
+  end) then
+    return
+  end
   after_write(root)
 end
 
@@ -2082,10 +2169,92 @@ end
 
 local DEFAULTS -- M.config before the first setup
 
+-- Options whose value is one of a few, or of more than one type.
+local CHOICES = {
+  conversation = { "float", "panel" },
+  agent = { "auto", "herdr", "headless" },
+  isolate = { "fork", "subagent", false },
+  progress_float = { true, false, "auto" },
+  icons = { true, false, "auto" },
+  diff_layout = { "split", "unified" },
+  sidebar_position = { "left", "right", "bottom", "top" },
+}
+local NUMBERS = { panel_width = true, sidebar_width = true, sidebar_height = true } -- default nil
+local NUMBER_OR_FALSE = { flash_ms = true }
+
+---Check the user's options against the defaults: a wrong one is reported and
+---dropped (its default is used), instead of failing later somewhere unrelated.
+---@return table opts the options to use
+---@return string[] problems
+local function validate(opts, defaults)
+  local out, problems = {}, {}
+  local function bad(name, why)
+    problems[#problems + 1] = string.format("%s %s; using the default", name, why)
+  end
+  for k, v in pairs(opts) do
+    local d = defaults[k]
+    if k == "keymaps" then
+      out[k] = v -- checked by keys.validate
+    elseif CHOICES[k] then
+      if vim.tbl_contains(CHOICES[k], v) then
+        out[k] = v
+      else
+        bad(k, "must be one of " .. table.concat(vim.tbl_map(vim.inspect, CHOICES[k]), ", "))
+      end
+    elseif NUMBERS[k] then
+      if v == nil or type(v) == "number" and v > 0 then
+        out[k] = v
+      else
+        bad(k, "must be a positive number")
+      end
+    elseif NUMBER_OR_FALSE[k] then
+      if v == false or type(v) == "number" then
+        out[k] = v
+      else
+        bad(k, "must be a number or false")
+      end
+    elseif k == "diff_colors" then
+      if type(v) == "boolean" or type(v) == "string" then
+        out[k] = v
+      else
+        bad(k, "must be true, false, \"auto\" or \"github-dark\"")
+      end
+    elseif d ~= nil and type(v) ~= type(d) then
+      bad(k, string.format("must be a %s, not a %s", type(d), type(v)))
+    else
+      out[k] = v
+    end
+  end
+  local h = type(out.headless) == "table" and out.headless or nil
+  if h then
+    if h.agent ~= nil and not require("code-review.agents").get(h.agent) then
+      bad("headless.agent", string.format("%s is not a known agent (claude, codex, opencode, gemini)", vim.inspect(h.agent)))
+      h.agent = nil
+    end
+    for _, f in ipairs({ "args", "allowed_tools" }) do
+      if h[f] ~= nil and not (type(h[f]) == "table" and vim.islist(h[f])) then
+        bad("headless." .. f, "must be a list of strings")
+        h[f] = nil
+      end
+    end
+  end
+  return out, problems
+end
+
 function M.setup(opts)
   opts = opts or {}
   -- always from the defaults, so calling setup again (re-sourcing the config) drops old choices
   DEFAULTS = DEFAULTS or vim.deepcopy(M.config)
+  local problems
+  opts, problems = validate(vim.deepcopy(opts), DEFAULTS)
+  local kproblems
+  opts.keymaps, kproblems = keys.validate(opts.keymaps, DEFAULTS.keymaps)
+  vim.list_extend(problems, kproblems)
+  if #problems > 0 then
+    vim.schedule(function() -- after startup, so it is seen
+      vim.notify("code-review: setup: " .. table.concat(problems, "\n"), vim.log.levels.WARN)
+    end)
+  end
   local km = keys.merge(DEFAULTS.keymaps, opts.keymaps)
   M.config = vim.tbl_deep_extend("force", vim.deepcopy(DEFAULTS), opts)
   M.config.keymaps = km

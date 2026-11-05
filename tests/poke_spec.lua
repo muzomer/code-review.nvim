@@ -76,6 +76,75 @@ describe("poke", function()
     restore()
   end)
 
+  it("hides the thread window while the picker is up, then brings it back", function()
+    fake()
+    local tid = store.read(root).threads[1].id
+    vim.cmd.edit(root .. "/f.lua")
+    local src = api.nvim_get_current_win()
+    local function thread_wins()
+      return vim.tbl_filter(function(w)
+        return api.nvim_win_get_config(w).relative ~= "" and vim.bo[api.nvim_win_get_buf(w)].filetype == "markdown"
+      end, api.nvim_list_wins())
+    end
+    ac.open_thread(root, tid)
+    eq(#thread_wins(), 1)
+    local during
+    vim.ui.select = function(items, _, cb)
+      picks = picks + 1
+      during = #thread_wins()
+      cb(items[1])
+    end
+    ac.poke(root, { pick = true })
+    eq(picks, 1)
+    eq(during, 0) -- not under the picker
+    assert(vim.wait(500, function() return #thread_wins() == 1 end), "thread window did not come back")
+    for _, w in ipairs(thread_wins()) do
+      api.nvim_win_close(w, true)
+    end
+    api.nvim_set_current_win(src)
+    restore()
+  end)
+
+  it("remembers an agent only once a poke to it went through", function()
+    fake()
+    os.remove(store.paths(root) .. "/poke-target.json") -- forget what earlier tests remembered
+    prompt_reply = { error = { code = "pane_not_found", message = "no such pane" } }
+    ac.poke(root)
+    eq(picks, 1)
+    eq(poke.saved_target(root), nil)
+    assert(table.concat(notes, "\n"):find("poke pick", 1, true), vim.inspect(notes))
+    prompt_reply = { result = { ok = true } }
+    ac.poke(root)
+    eq(picks, 2) -- asked again
+    eq(poke.saved_target(root).pane_id, "w1:p1")
+    restore()
+  end)
+
+  it("a failed agent list keeps the remembered agent instead of switching", function()
+    fake()
+    ac.poke(root, { pick = true }) -- remembers w1:p1
+    local run = poke.run
+    poke.run = function(args)
+      calls[#calls + 1] = args
+      return { code = 1, stdout = "", stderr = "socket closed" }
+    end
+    ac.poke(root)
+    poke.run = run
+    eq(poke.saved_target(root).pane_id, "w1:p1")
+    eq(picks, 1)
+    assert(table.concat(notes, "\n"):find("socket closed", 1, true), vim.inspect(notes))
+    restore()
+  end)
+
+  it("output that is not JSON is not taken for a success", function()
+    local res, err = poke.decode({ code = 0, stdout = "Usage: herdr <command>\n", stderr = "" })
+    eq(res, nil)
+    assert(err:find("Usage: herdr", 1, true), err)
+    eq(poke.decode({ code = 0, stdout = "", stderr = "" }), {})
+    res, err = poke.decode({ code = 124, signal = 15, stdout = "", stderr = "" })
+    assert(err:find("did not answer", 1, true), err)
+  end)
+
   it("asks again when the remembered agent is gone", function()
     fake()
     local gone = vim.deepcopy(agents)

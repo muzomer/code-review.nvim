@@ -454,3 +454,50 @@ describe("thread list: actions", function()
     vim.cmd("cclose")
   end)
 end)
+
+describe("a comment that cannot be saved", function()
+  it("opens the box again with the text, so nothing is lost", function()
+    local root = tmp_project({ ["k.lua"] = { "x" } })
+    vim.cmd.edit(root .. "/k.lua")
+    local update, notify = store.update, vim.notify
+    local notes = {}
+    store.update = function() error("cannot lock …: EACCES", 0) end
+    vim.notify = function(m) notes[#notes + 1] = m end
+    ac.add(1, 1)
+    api.nvim_buf_set_lines(0, 0, -1, false, { "keep this" })
+    api.nvim_feedkeys(api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+    store.update, vim.notify = update, notify
+    eq(api.nvim_win_get_config(0).relative ~= "", true) -- a comment box again
+    eq(api.nvim_buf_get_lines(0, 0, -1, false), { "keep this" })
+    assert(table.concat(notes, "\n"):find("EACCES", 1, true), vim.inspect(notes))
+    api.nvim_feedkeys(api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false) -- saves now
+    eq(store.read(root).threads[1].messages[1].body, "keep this")
+    vim.cmd("silent! %bwipeout!")
+  end)
+end)
+
+describe("watching the comments file", function()
+  it("keeps showing agent replies after .code-review was deleted and made again", function()
+    local root = tmp_project({ ["w.lua"] = { "x" } })
+    vim.cmd.edit(root .. "/w.lua")
+    local buf = api.nvim_get_current_buf()
+    local function add(body)
+      local id = store.update(root, function(d)
+        return store.add_thread(d, { file = "w.lua", start = 1, ["end"] = 1, anchor = anchor.capture({ "x" }, 1, 1), author = "user", body = body })
+      end)
+      ac.after_write(root)
+      return id
+    end
+    add("first")
+    vim.fn.delete(store.paths(root), "rf")
+    vim.wait(200) -- the watch notices
+    local id = add("second") -- makes the directory again
+    store.update(root, function(d) store.add_message(store.find(d, id), "agent", "agent says hi") end) -- the CLI, behind our back
+    assert(vim.wait(2000, function()
+      return vim.iter(main_marks(buf)):any(function(m)
+        return vim.iter(m[4].virt_text):any(function(c) return c[1]:find("agent says hi", 1, true) end)
+      end)
+    end), "the reply never showed")
+    vim.cmd("silent! %bwipeout!")
+  end)
+end)

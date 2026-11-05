@@ -79,7 +79,22 @@ describe("background agent", function()
     eq(headless.session_id(root), id)
     eq(arg_after(p, "--output-format"), "stream-json")
     eq(arg_after(p, "--allowedTools"), "Bash(code-review:*)")
+    -- the full path of this checkout's CLI is allowed too: nobody can approve it in the background
+    local agents = require("code-review.agents")
+    assert(vim.tbl_contains(p.args, "Bash(" .. agents.BIN .. "/code-review:*)"), vim.inspect(p.args))
+    eq(vim.fn.executable(agents.BIN .. "/code-review"), 1)
     assert(p.args[3]:find("code-review", 1, true) and p.args[3]:find("background", 1, true))
+    assert(p.args[3]:find("exactly as written", 1, true), p.args[3])
+  end)
+
+  case("a PR review stays read-only; a local one may edit", function()
+    local root = project()
+    local args = headless.args(root, "x", { new_id = "id" })
+    assert(vim.tbl_contains(args, "Edit"), vim.inspect(args))
+    eq(arg_after({ args = args }, "--add-dir"), nil) -- it runs in the project already
+    require("code-review.session").save(root, { kind = "pr", owner = "o", repo = "r", number = 1, files = {}, cache = root .. "/c" })
+    args = headless.args(root, "x", { new_id = "id" })
+    assert(not vim.tbl_contains(args, "Edit") and not vim.tbl_contains(args, "Write"), vim.inspect(args))
   end)
 
   case("the next poke resumes the same session", function()
@@ -118,6 +133,67 @@ describe("background agent", function()
     progress.tick()
     eq(headless.status(root).status, "failed")
     assert(vim.iter(notes):any(function(n) return n:find("failed: boom", 1, true) end), vim.inspect(notes))
+  end)
+
+  case("a process that cannot start is reported, and the next poke tries again", function()
+    local root = project()
+    local spawn = headless.spawn
+    headless.spawn = function() error("ENOENT: no such file or directory (cwd): '/gone'") end
+    ac.poke(root)
+    eq(headless.status(root).status, "failed")
+    assert(vim.iter(notes):any(function(n) return n:find("could not start", 1, true) and n:find("ENOENT", 1, true) end), vim.inspect(notes))
+    assert(not vim.iter(notes):any(function(n) return n:find("poked", 1, true) end), vim.inspect(notes))
+    eq(headless.session_id(root), nil) -- the session it was going to create does not exist
+    headless.spawn = spawn
+    ac.poke(root) -- not stuck as "still working"
+    eq(#spawned, 1)
+  end)
+
+  case("a bad config.headless.args does not leave the run working", function()
+    local root = project()
+    local args = headless.args
+    headless.args = function() error("args must be a list") end
+    ac.poke(root)
+    headless.args = args
+    eq(headless.status(root).status, "failed")
+    ac.poke(root)
+    eq(#spawned, 1)
+  end)
+
+  case("a run killed by a signal is a failure, not done", function()
+    local root = project()
+    ac.poke(root)
+    spawned[1].on_exit(0, "", 9)
+    eq(headless.status(root).status, "failed")
+    assert(headless.status(root).error:find("signal 9", 1, true), headless.status(root).error)
+  end)
+
+  case("a poke queued behind a run whose session was lost still runs", function()
+    local root = project()
+    ac.poke(root)
+    spawned[1].on_exit(0, "")
+    ac.poke(root) -- resumes the session
+    ac.poke(root) -- queued
+    spawned[2].on_exit(1, "No conversation found with session ID: x")
+    eq(#spawned, 3) -- the retry in a new session
+    spawned[3].on_exit(0, "")
+    eq(#spawned, 4) -- then the queued poke
+  end)
+
+  case("a failed run is reported even when progress is off", function()
+    ac.config.progress = false
+    local root = project()
+    ac.poke(root)
+    spawned[1].on_exit(1, "auth expired")
+    ac.config.progress = true
+    assert(vim.iter(notes):any(function(n) return n:find("auth expired", 1, true) end), vim.inspect(notes))
+  end)
+
+  case("leaving Neovim stops the runs still working", function()
+    local root = project()
+    ac.poke(root)
+    headless.stop_all()
+    eq(spawned[1].killed, true)
   end)
 
   case("a poke while it works is queued and runs when the agent is done", function()
@@ -236,5 +312,12 @@ describe("background agent", function()
     eq(#store.read(root).threads, 1)
     eq(#spawned, 0)
     vim.cmd("silent! %bwipeout!")
+  end)
+
+  it("the last line of output counts even without a newline", function()
+    local lines, done = {}, false
+    saved.spawn({ "sh", "-c", "printf 'one\\ntwo'" }, vim.fn.getcwd(), function(l) lines[#lines + 1] = l end, function() done = true end)
+    assert(vim.wait(2000, function() return done end))
+    eq(lines, { "one", "two" })
   end)
 end)

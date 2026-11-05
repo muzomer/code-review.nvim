@@ -188,9 +188,11 @@ the agent runs:
   Claude Code is tested against its CLI; the others follow their documentation.
 
 `<leader>cP` shows the output of a fork or of the background agent. By default
-Claude may only run the `code-review` CLI and read files (`Read`, `Grep`,
-`Glob`); widen that with `headless.allowed_tools` / `headless.permission_mode`,
-e.g. to let it change code in a local review.
+Claude may run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`),
+and in a local review also change them (`Edit`, `Write`) — only inside its
+directory and the reviewed project (a fork gets the project with `--add-dir`).
+A PR review stays read-only. Set `headless.allowed_tools` (it replaces the whole
+list) or `headless.permission_mode` to choose differently.
 
 ## How it works
 
@@ -284,7 +286,7 @@ require("code-review").setup({
   headless = {                  -- the background agent
     agent = "claude",           -- "claude", "codex", "opencode", "gemini"
     cmd = nil,                  -- executable (default: the agent's own)
-    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" }
+    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit", "Write" in a local review)
     permission_mode = nil,      -- claude --permission-mode, codex --sandbox, gemini --approval-mode,
                                 -- opencode "auto" (--auto)
     args = {},                  -- extra arguments for every run

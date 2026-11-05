@@ -35,7 +35,8 @@ function M.merge(defaults, user)
   local out = vim.deepcopy(defaults)
   for k, v in pairs(user or {}) do
     local d = out[k]
-    if type(v) == "table" and not vim.islist(v) and type(d) == "table" and not vim.islist(d) then
+    -- a group (an empty table counts as one: vim.islist({}) is true)
+    if type(v) == "table" and (next(v) == nil or not vim.islist(v)) and type(d) == "table" and not vim.islist(d) then
       for k2, v2 in pairs(v) do
         d[k2] = v2
       end
@@ -44,6 +45,50 @@ function M.merge(defaults, user)
     end
   end
   return out
+end
+
+local function is_binding(v)
+  if v == false or v == nil or type(v) == "string" then
+    return true
+  end
+  return type(v) == "table" and vim.islist(v) and vim.iter(v):all(function(k) return type(k) == "string" end)
+end
+
+---Drop the bindings of the user's `keymaps` that are not a key, a list of keys
+---or false (a group, like `input`, must be a table of bindings).
+---@return table|false|nil keymaps
+---@return string[] problems
+function M.validate(user, defaults)
+  local problems = {}
+  if user == nil or user == false then
+    return user, problems
+  end
+  if type(user) ~= "table" then
+    return nil, { "keymaps must be a table or false; using the defaults" }
+  end
+  local out = {}
+  for k, v in pairs(user) do
+    local d = defaults[k]
+    if type(d) == "table" and not vim.islist(d) then -- a group
+      if type(v) ~= "table" or vim.islist(v) then
+        problems[#problems + 1] = string.format("keymaps.%s must be a table of bindings; using the defaults", k)
+      else
+        out[k] = {}
+        for k2, v2 in pairs(v) do
+          if is_binding(v2) then
+            out[k][k2] = v2
+          else
+            problems[#problems + 1] = string.format("keymaps.%s.%s must be a key, a list of keys or false; using the default", k, k2)
+          end
+        end
+      end
+    elseif is_binding(v) then
+      out[k] = v
+    else
+      problems[#problems + 1] = string.format("keymaps.%s must be a key, a list of keys or false; using the default", k)
+    end
+  end
+  return out, problems
 end
 
 ---The bindings of a group of the config (thread, input, sidebar).

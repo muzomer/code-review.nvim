@@ -135,6 +135,21 @@ describe("progress", function()
     restore()
   end)
 
+  case("a poll that never answers does not keep the status window forever", function()
+    fake()
+    waiting_thread()
+    ac.poke(root)
+    local run_async, timeout = poke.run_async, progress.timeout_ms
+    poke.run_async = function() end -- herdr hangs: no answer, ever
+    progress.tick()
+    progress.timeout_ms = -1
+    progress.tick()
+    poke.run_async, progress.timeout_ms = run_async, timeout
+    eq(progress.statusline(), "")
+    assert(table.concat(notes, "\n"):find("stopped following", 1, true), vim.inspect(notes))
+    restore()
+  end)
+
   case("does not call a not-yet-started agent done", function()
     fake()
     waiting_thread()

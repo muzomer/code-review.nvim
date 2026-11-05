@@ -75,6 +75,11 @@ local function code_of(t)
   return table.concat(out, "\n")
 end
 
+-- Runs without a terminal cannot ask for permission: steer them to the one
+-- form of the command they are allowed to run.
+local NOBODY_APPROVES = " Run `code-review` exactly as written here: it is on your PATH and allowed;"
+  .. " other forms (a full path, `export PATH=...;` or `cd ...;` in front) need an approval nobody can give here."
+
 -- How the agent should work, by where it runs.
 M.STYLE = {
   -- typed into an interactive session that should stay small
@@ -83,18 +88,21 @@ M.STYLE = {
   -- a throwaway fork of the main session
   fork = "You are a temporary copy of the conversation above, started only to answer these comments:"
     .. " nothing you say here is kept, so everything the reviewer should read must go into the threads."
+    .. NOBODY_APPROVES
     .. " End with one line only, e.g. \"answered 3 review threads\".",
   -- the review's own background session
   background = "You run in the background and nobody watches this output: do not ask questions here,"
-    .. " put everything the reviewer should read into the threads. End with one line only.",
+    .. " put everything the reviewer should read into the threads." .. NOBODY_APPROVES .. " End with one line only.",
   -- typed into a session as is
   plain = "Your replies are already in the threads, so when you are done answer here with one line only,"
     .. " e.g. \"answered 3 review threads\"; do not repeat them.",
 }
 
 ---Build the prompt for the threads waiting on the agent.
----@param opts? { style?: "subagent"|"fork"|"background"|"plain", all?: boolean, author?: string }
----all: ignore what was sent before; author: the name the agent signs its replies with
+---@param opts? { style?: "subagent"|"fork"|"background"|"plain", all?: boolean, author?: string, cwd?: string|false }
+---all: ignore what was sent before; author: the name the agent signs its replies with;
+---cwd: where the agent runs (nil: unknown). Unless that is the project, the
+---commands name it with --root: the CLI finds the comments from its directory.
 ---@return string? text nil when no thread waits on the agent
 ---@return table sent signatures to record with `M.mark_sent` once the prompt is delivered
 ---@return { new: integer, followup: integer, waiting: integer } counts
@@ -106,6 +114,13 @@ function M.build(root, opts)
   local pr = s and s.kind == "pr" and s or nil
   local ref = pr and string.format("%s/%s#%d", pr.owner, pr.repo, pr.number)
   local cli = ref and ("code-review --pr " .. ref) or "code-review"
+  local function same(a, b)
+    return a and b and vim.fs.normalize(a):gsub("/$", "") == vim.fs.normalize(b):gsub("/$", "")
+  end
+  if not ref and not same(opts.cwd, root) then
+    local r = root:match("^[%w/._~-]+$") and root or vim.fn.shellescape(root)
+    cli = "code-review --root " .. r
+  end
 
   local fresh, older, sent = {}, {}, {}
   for _, t in ipairs(ok and data.threads or {}) do

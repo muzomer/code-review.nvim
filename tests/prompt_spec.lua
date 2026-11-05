@@ -19,12 +19,16 @@ describe("poke prompt", function()
   it("carries each waiting thread: id, place, code and your message", function()
     local root = tmp_project({ ["a.lua"] = { "x" } })
     add(root, { file = "a.lua", start = 3, ["end"] = 4, anchor = { text = { "local ok = pcall(load)", "if not ok then return end" } }, body = "why swallow\nthe error?" })
-    local text, _, counts = prompt.build(root, { style = "subagent" })
+    local text, _, counts = prompt.build(root, { style = "subagent", cwd = root })
     assert(text:find("(1 new)", 1, true), text)
     assert(text:find("a.lua:3-4 — new", 1, true), text)
     assert(text:find("    > local ok = pcall(load)", 1, true), text)
     assert(text:find("  you: why swallow\n    the error?", 1, true), text)
     assert(text:find("code-review reply <id>", 1, true), text)
+    -- an agent elsewhere (a fork runs where its session started) is told which project
+    local elsewhere = prompt.build(root, { style = "fork", cwd = "/somewhere/else" })
+    assert(elsewhere:find("code-review --root " .. root .. " reply <id>", 1, true), elsewhere)
+    assert(prompt.build(root, { style = "plain" }):find("--root", 1, true)) -- unknown: say it too
     assert(text:find("subagent (Task tool)", 1, true), text)
     eq(counts, { new = 1, followup = 0, waiting = 0 })
   end)
@@ -106,8 +110,8 @@ describe("poke: keeping the agent's session small", function()
     vim.env.HERDR_PANE_ID = "w1:p5"
     poke.available = function() return true end
     headless.available = function() return true end
-    headless.spawn = function(args, cwd)
-      spawned[#spawned + 1] = { args = args, cwd = cwd }
+    headless.spawn = function(args, cwd, _, _, env)
+      spawned[#spawned + 1] = { args = args, cwd = cwd, env = env }
       return { kill = function() end }
     end
     poke.run = function(args)
@@ -175,6 +179,11 @@ describe("poke: keeping the agent's session small", function()
     eq(arg_after(spawned[1].args, "--resume"), "11111111-2222-4333-8444-555555555555")
     assert(vim.tbl_contains(spawned[1].args, "--fork-session"))
     eq(spawned[1].cwd, "/work/started-here") -- where the session was started, not where the pane is now
+    eq(spawned[1].env, { NVIM_CODE_REVIEW_ROOT = root }) -- the CLI still finds this project's comments
+    -- it may change the code the comments are about, in the reviewed project
+    assert(vim.tbl_contains(spawned[1].args, "Edit") and vim.tbl_contains(spawned[1].args, "Write"), vim.inspect(spawned[1].args))
+    eq(arg_after(spawned[1].args, "--add-dir"), root)
+    assert(spawned[1].args[3]:find("--root " .. root, 1, true), spawned[1].args[3])
     assert(spawned[1].args[3]:find("temporary copy", 1, true), spawned[1].args[3])
     eq(headless.session_id(root), nil) -- a fork is not the review's background session
     assert(progress.agent_title():find("Main (fork)", 1, true), tostring(progress.agent_title()))
@@ -187,6 +196,8 @@ describe("poke: keeping the agent's session small", function()
     eq(#spawned, 0)
     eq(#typed(), 1)
     assert(typed()[1][5]:find("subagent (Task tool)", 1, true), typed()[1][5])
+    -- says so: the prompt lands in the live session the fork was meant to spare
+    assert(vim.iter(notes):any(function(n) return n:find("could not find the session of Main to fork", 1, true) end), vim.inspect(notes))
   end)
 
   case("isolate = false types the plain prompt", function()

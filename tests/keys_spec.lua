@@ -69,4 +69,29 @@ describe("key bindings", function()
     vim.cmd("cclose")
     ac.setup({ notify = false })
   end)
+
+  it("setup reports wrong options and keeps their defaults", function()
+    local ac = require("code-review")
+    local notify, notes = vim.notify, {}
+    vim.notify = function(m) notes[#notes + 1] = m end
+    ac.setup({
+      panel_width = "50",
+      headless = { agent = "Codex", args = "--x" },
+      diff_layout = "sideways",
+      keymaps = { input = "x", thread = { reply = 3 }, list = { "<C-l>" } },
+    })
+    vim.wait(50, function() return #notes > 0 end)
+    vim.notify = notify
+    local text = table.concat(notes, "\n")
+    for _, want in ipairs({ "panel_width", "headless.agent", "headless.args", "diff_layout", "keymaps.input", "keymaps.thread.reply" }) do
+      assert(text:find(want, 1, true), want .. " not reported:\n" .. text)
+    end
+    eq(ac.config.panel_width, nil)
+    eq(ac.config.headless.agent, "claude")
+    eq(ac.config.diff_layout, "split")
+    eq(ac.config.keymaps.input.submit, "<C-s>") -- the comment box can still be sent
+    eq(ac.config.keymaps.thread.reply, { "r", "i" })
+    eq(ac.config.keymaps.list, { "<C-l>" }) -- the right ones are kept
+    ac.setup({ notify = false })
+  end)
 end)

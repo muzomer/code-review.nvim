@@ -439,17 +439,25 @@ local function apply(st, agent)
   else
     present(st, string.format("… %s · %s", st.title, status or "unknown"), "working")
   end
-  if elapsed(st) * 1000 > M.timeout_ms then
-    notify("stopped following " .. st.title .. " (taking very long)", vim.log.levels.WARN)
-    M.stop()
+end
+
+---Give up following after config timeout: checked on every tick, so a poll
+---that never answers cannot keep the status window up forever.
+local function timed_out(st)
+  if elapsed(st) * 1000 <= M.timeout_ms then
+    return false
   end
+  local hint = st.pane_id == poke.HEADLESS and "; it may be stuck: :CodeReview stop ends it" or ""
+  notify("stopped following " .. st.title .. " (taking very long" .. hint .. ")", vim.log.levels.WARN)
+  M.stop()
+  return true
 end
 
 ---Poll the agent once. A poll that is still running makes the next one skip, so
 ---answers can never arrive out of order.
 function M.tick()
   local st = state
-  if not st or st.finished or st.inflight then
+  if not st or st.finished or timed_out(st) or st.inflight then
     return
   end
   if st.pane_id == poke.HEADLESS then

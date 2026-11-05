@@ -136,7 +136,13 @@ end
 
 ---Put your last message in the input box to edit it (until the agent replies).
 function M.edit_last()
-  local data = store.read(state.root)
+  if not M.is_open() then -- the input window was closed
+    return
+  end
+  local ok, data = pcall(store.read, state.root)
+  if not ok then
+    return vim.notify("code-review: " .. tostring(data), vim.log.levels.ERROR)
+  end
   local t = store.find(data, state.tid)
   local last = t and t.messages[#t.messages]
   if not last or last.author ~= "user" then
@@ -161,7 +167,7 @@ function M.send(alt)
   end
   local root, tid, editing = state.root, state.tid, state.edit
   local refused
-  store.update(root, function(d)
+  local ok, err = pcall(store.update, root, function(d)
     local t = store.find(d, tid)
     if not t then
       refused = "the thread no longer exists"
@@ -180,6 +186,9 @@ function M.send(alt)
       end
     end
   end)
+  if not ok then -- the text stays in the input box
+    return vim.notify("code-review: not sent: " .. tostring(err), vim.log.levels.ERROR)
+  end
   if refused then
     return vim.notify("code-review: not sent: " .. refused, vim.log.levels.WARN)
   end
