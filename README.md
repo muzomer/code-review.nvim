@@ -45,7 +45,7 @@ from `:terminal` find it.
 | `<leader>cr`                                           | open the thread under the cursor; with several on the line, the one whose text you are on, else a picker     |
 | `<leader>ce` (`:CodeReview edit`)                      | edit your last comment of the thread under the cursor, until the agent replies                               |
 | `<leader>cx`                                           | resolve / reopen the thread under the cursor                                                                 |
-| `<leader>cy` (`:CodeReview approve`)                   | let the agent change the code for the thread under the cursor (again: withdraw); `a` in a thread             |
+| `<leader>cy` (`:CodeReview approve`)                   | approve one code change for the thread, sent at once (again: withdraw); see [Discuss first](#discuss-first)  |
 | `:CodeReview delete`                                   | delete the thread under the cursor                                                                           |
 | `]r` / `[r`                                            | next / previous thread in the buffer, one stop per thread (wraps, takes a count)                             |
 | `]u` / `[u`                                            | next / previous thread waiting for you (the agent replied), across files                                     |
@@ -71,6 +71,7 @@ On a thread (thread window, thread list, conversation panel):
 | `e`                  | edit your last message, until the agent replies   |
 | `s`                  | send to the agent                                 |
 | `x` / `d`            | resolve or reopen / delete                        |
+| `a`                  | approve one code change / withdraw it             |
 | `n` / `p`, `N` / `P` | next / previous thread in the file / across files |
 | `?` / `q`            | list the keys / close                             |
 
@@ -80,7 +81,7 @@ updates as you go. In the comment box, `<C-s>` (or `<CR>` in normal mode) saves,
 sends, and the footer says which is which.
 
 Sign colours: warning = waiting for you, info = waiting for the agent; `◆` = an
-agent opened the thread. Every key can be changed, given several keys or turned
+agent opened the thread; a number = that many threads start on the line. Every key can be changed, given several keys or turned
 off: see `keymaps` in [Configuration](#configuration).
 
 ## Reviewing a PR (no checkout)
@@ -121,7 +122,11 @@ The changed files appear in a sidebar on the left, as a folder tree:
 | `:CodeReview since` (`S` in the sidebar)             | what changed since your last review (previous head → current head)      |
 | `q` / `:CodeReview files`                            | hide / show the sidebar                                                 |
 
-Comments stay on your machine; nothing is posted to GitHub. A PR you reviewed before opens at once and is checked for new commits in the background. Agents read the same snapshots: `code-review --pr REF diff` prints their paths, `code-review --pr REF file <path>` fetches any other file. For lualine: `lualine_x = { require("code-review").lualine }`.
+Comments stay on your machine; nothing is posted to GitHub. A PR you reviewed
+before opens at once and is checked for new commits in the background. Agents
+read the same snapshots: `code-review --pr REF diff` prints their paths,
+`code-review --pr REF file <path>` fetches any other file. For lualine:
+`lualine_x = { require("code-review").lualine }`.
 
 ## Usage by agents
 
@@ -142,12 +147,12 @@ Give your agent the instructions once: copy `skills/nvim-code-review` to
 comments", or paste the prompt from `:CodeReview copy`.
 
 Agents use `--author <name>` (default `agent`). They can add threads, reply and
-resolve, but cannot post as `user`, reopen, or delete. Those actions are yours.
+resolve, but cannot post as `user`, reopen, approve, or delete. Those actions are yours.
 
 ### Poking the agent
 
-`<leader>cp` (or `<M-s>` when writing a comment) tells an agent to answer your
-comments. The prompt carries the comments that changed since the last poke:
+`<leader>cp` (or `<M-s>` when writing a comment, or approving a change) tells an
+agent to answer your comments. The prompt carries the comments that changed since the last poke:
 thread id, file and lines, the commented code and your new messages, so the
 agent can answer without listing or reading first. Threads it was already sent
 are only named. It ends with "answer here with one line", because the replies
@@ -173,7 +178,7 @@ the agent runs:
   or `"codex"`, `"opencode"`, `"gemini"`), started without a terminal.
   It is used when herdr is not there, when no agent runs in it, or when you pick
   "… (background)" in the list. The first poke starts a new session; later
-  pokes resume it, so the agent keeps what it learned about the PR between
+  pokes resume it, so the agent keeps what it learned about the code between
   pokes, even across Neovim restarts. The session id is in
   `.code-review/headless.json` and runs start in the review root (agents file
   sessions by directory). A poke while it works is queued and runs when it
@@ -188,25 +193,26 @@ the agent runs:
 
   Claude Code is tested against its CLI; the others follow their documentation.
 
-`<leader>cP` shows the output of a fork or of the background agent. By default
-Claude may run the `code-review` CLI and read files (`Read`, `Grep`, `Glob`).
+`<leader>cP` shows the output of a fork or of the background agent.
 
-**Discuss first.** By default (`agent_changes = "discuss"`) the agent does not
-change code because a comment asks for it: it answers and proposes the change
-(a ```suggestion block). When you agree, press `<leader>cy` (or `a` in the
-thread): that adds "Go ahead: apply the changes" to the thread and marks it
-approved, and the next poke tells the agent to make the change. Press it again
-to withdraw. An approval is for one answer: once the agent replies in the
-thread, a later question there is discussed again until you approve again. Only then
-may Claude change files (`Edit`, `Write`) — only inside the reviewed project
-(`Edit(//<project>/**)`), never in the directory a fork started in (a fork gets
-the project with `--add-dir`). The permission covers the whole run: when one
-thread is approved, the others in that run are kept unchanged by the prompt
-alone. For the other agents the prompt asks them not
-to edit; their own sandbox settings are what enforces it. Set
-`agent_changes = "auto"` to let the agent change code whenever a comment asks.
-A PR review stays read-only. Set `headless.allowed_tools` (it replaces the whole
-list) or `headless.permission_mode` to choose differently.
+### Discuss first
+
+By default (`agent_changes = "discuss"`) the agent answers your comments and
+proposes changes as a `suggestion` block, without editing files. To let it
+apply one, press `<leader>cy` (`a` on a thread): this adds "Go ahead: apply the
+changes" to the thread and sends it to the agent at once. The approval lasts
+until the agent's next reply in that thread; press the key again to withdraw it
+sooner (also sent at once).
+`agent_changes = "auto"` lets the agent change code whenever a comment asks.
+A PR review never changes code.
+
+How this is enforced: Claude may always run the `code-review` CLI and read files
+(`Read`, `Grep`, `Glob`). A run with an approved thread also gets
+`Edit(//<project>/**)`, which covers `Write`: only inside the reviewed project,
+never in the directory a fork started in. The permission is per run, so other
+threads in that run rely on the prompt. Other agents rely on the prompt alone,
+unless their own sandbox (`headless.permission_mode`) is stricter.
+`headless.allowed_tools` replaces Claude's list.
 
 ## How it works
 
@@ -218,17 +224,17 @@ list) or `headless.permission_mode` to choose differently.
   (`$NVIM_CODE_REVIEW_STATE`) and its file snapshots under the cache directory
   (`$NVIM_CODE_REVIEW_CACHE`), one directory per PR.
 - **Threads**: `{id, file, range, anchor, status: open|resolved|outdated,
-needs: agent|user|none, messages: [{id, author, ts, body}]}`. `needs` is
-  derived from the last message's author.
+  needs: agent|user|none, approved?, messages: [{id, author, ts, body}]}`.
+  `needs` follows the last message's author; `approved` is set by
+  `<leader>cy` and cleared by the agent's next reply.
 - **Anchoring**: each thread stores the commented lines plus 2 lines of context.
   In an open buffer, extmarks follow your edits and are saved on write. When a
   file is loaded, or when an agent runs `list`/`show`, threads are relocated:
   stored position → exact text search (context breaks ties) → fuzzy match
   (≥ 0.8 bigram similarity) → otherwise `outdated` (shown dimmed, recovers if
-  the code comes back). A thread on selected text also stores that text
-  (`anchor.span`) and its columns (`range.start_col` / `range.end_col`, 1-based
-  bytes, end inclusive): it is found again inside its lines, and when the text
-  is gone the thread stays on the whole lines.
+  the code comes back). A comment on selected text also keeps that text
+  (`anchor.span`) and its columns (`range.start_col` / `end_col`, 1-based bytes);
+  when the text is gone, it stays on its lines.
 
 ## Configuration
 
@@ -242,7 +248,7 @@ require("code-review").setup({
     open = "<leader>cr",        -- open the thread under the cursor
     edit = "<leader>ce",        -- edit your last comment, until the agent replies
     resolve = "<leader>cx",     -- resolve / reopen
-    approve = "<leader>cy",     -- let the agent change the code for this thread (again: withdraw)
+    approve = "<leader>cy",     -- approve one code change for this thread (again: withdraw)
     list = { "<C-l>", "<leader>cl" },        -- toggle open threads → quickfix
     list_all = { "<C-S-l>", "<leader>cL" },  -- toggle all threads, resolved too (Ctrl+Shift+L: kitty, WezTerm, ...)
     next = "]r", prev = "[r",   -- next / previous thread in the buffer
@@ -305,7 +311,7 @@ require("code-review").setup({
   headless = {                  -- the background agent
     agent = "claude",           -- "claude", "codex", "opencode", "gemini"
     cmd = nil,                  -- executable (default: the agent's own)
-    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit(//<project>/**)" in a local review)
+    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit(//<project>/**)" when a change is approved)
     permission_mode = nil,      -- claude --permission-mode, codex --sandbox, gemini --approval-mode,
                                 -- opencode "auto" (--auto)
     args = {},                  -- extra arguments for every run
@@ -334,6 +340,7 @@ Highlights are defined with `default = true`, so your colorscheme or your own
 | `CodeReviewNeedsAgent` / `CodeReviewNeedsUser`                             | signs: waiting on the agent / on you             |
 | `CodeReviewAgent`, `CodeReviewVirt`, `CodeReviewDim`, `CodeReviewOutdated` | agent threads, virtual text, resolved, outdated  |
 | `CodeReviewAuthorYou` / `CodeReviewAuthorAgent`                            | names in conversations                           |
+| `CodeReviewSpan` / `CodeReviewSpanResolved`                                | the text of a comment on part of a line          |
 | `CodeReviewDiffAdded` / `CodeReviewDiffRemoved` (+ `…Text`)                | changed lines (and the changed part) in PR diffs |
 | `CodeReviewProgressWorking` / `…Done` / `…Blocked`                         | the agent's status after a poke                  |
 | `CodeReviewQfCurrent`                                                      | the open file in the sidebar                     |
