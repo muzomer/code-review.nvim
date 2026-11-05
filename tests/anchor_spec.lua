@@ -65,3 +65,58 @@ describe("reanchor_threads", function()
     eq(anchor.reanchor_threads({ thread(base, 2, 4) }, base), false)
   end)
 end)
+
+describe("threads on selected text", function()
+  local code = { "local x = 1", "local delay = retry_delay_ms * attempt", "return delay" }
+  local function span_thread(lines, s, e, sc, ec)
+    return {
+      status = "open",
+      range = { start = s, ["end"] = e, start_col = sc, end_col = ec },
+      anchor = anchor.capture(lines, s, e, sc, ec),
+    }
+  end
+
+  it("captures the selected text, across lines too", function()
+    eq(anchor.capture(code, 2, 2, 15, 38).span, "retry_delay_ms * attempt")
+    eq(anchor.capture(code, 1, 2, 7, 5).span, "x = 1\nlocal")
+    eq(anchor.capture(code, 2, 2).span, nil) -- whole lines: no span
+  end)
+
+  it("keeps its columns when the code only moved", function()
+    local t = span_thread(code, 2, 2, 15, 38)
+    local moved = { "-- new", "local x = 1", "local delay = retry_delay_ms * attempt", "return delay" }
+    eq(anchor.reanchor_threads({ t }, moved), true)
+    eq(t.range, { start = 3, ["end"] = 3, start_col = 15, end_col = 38 })
+  end)
+
+  it("finds its text again in a lightly edited line", function()
+    local t = span_thread(code, 2, 2, 15, 38)
+    local edited = { "local x = 1", "local delay_s = retry_delay_ms * attempt", "return delay" }
+    anchor.reanchor_threads({ t }, edited)
+    eq(t.range, { start = 2, ["end"] = 2, start_col = 17, end_col = 40 })
+    eq(t.anchor.span, "retry_delay_ms * attempt")
+    eq(t.status, "open")
+  end)
+
+  it("picks the occurrence nearest to where it was", function()
+    local lines = { "f(a) + f(a) + f(a)!" }
+    local t = span_thread(lines, 1, 1, 15, 18) -- the third f(a)
+    anchor.reanchor_threads({ t }, { "f(a) + f(a) + f(a)?" })
+    eq({ t.range.start_col, t.range.end_col }, { 15, 18 })
+  end)
+
+  it("falls back to the whole lines when its text is gone", function()
+    local t = span_thread(code, 2, 2, 15, 38)
+    local edited = { "local x = 1", "local delay = retry_ms * attempt", "return delay" }
+    anchor.reanchor_threads({ t }, edited)
+    eq(t.status, "open")
+    eq(t.range, { start = 2, ["end"] = 2 })
+    eq(anchor.cols(t), nil)
+  end)
+
+  it("a thread without columns is on whole lines", function()
+    eq(anchor.cols({ range = { start = 1, ["end"] = 1 } }), nil)
+    eq(anchor.cols({ range = { start = 1, ["end"] = 1, start_col = "x", end_col = 2 } }), nil)
+    eq({ anchor.cols({ range = { start = 1, ["end"] = 1, start_col = 3, end_col = 4 } }) }, { 3, 4 })
+  end)
+end)

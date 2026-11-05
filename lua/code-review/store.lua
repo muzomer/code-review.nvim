@@ -352,14 +352,14 @@ function M.edit_last_user_message(t, body)
   return true
 end
 
----@param o {file:string, side?:"old"|"new", base?:string, start:integer, ["end"]:integer, anchor:table, author:string, body:string}
+---@param o {file:string, side?:"old"|"new", base?:string, start:integer, ["end"]:integer, start_col?:integer, end_col?:integer, anchor:table, author:string, body:string}
 function M.add_thread(data, o)
   local t = {
     id = new_id(data),
     file = o.file,
     side = o.side ~= "new" and o.side or nil,
     base = o.base,
-    range = { start = o.start, ["end"] = o["end"] },
+    range = { start = o.start, ["end"] = o["end"], start_col = o.start_col, end_col = o.end_col },
     anchor = o.anchor,
     status = "open",
     messages = {},

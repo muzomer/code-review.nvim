@@ -87,8 +87,10 @@ local function format_thread(t)
   if t.side == "old" then
     where = where .. " (OLD side" .. (t.base and (" @" .. t.base:sub(1, 7)) or "") .. ")"
   end
+  local span = require("code-review.anchor").cols(t) and (t.anchor or {}).span
   local lines = {
-    string.format("%s  [%s, needs %s]  %s:%s", t.id, t.status, t.needs, where, loc),
+    string.format("%s  [%s, needs %s]  %s:%s%s", t.id, t.status, t.needs, where, loc,
+      span and string.format(' on "%s"', span:gsub("\n", "⏎")) or ""),
   }
   for i, l in ipairs((t.anchor or {}).text or {}) do
     lines[#lines + 1] = string.format("  %5d | %s", r.start + i - 1, l)

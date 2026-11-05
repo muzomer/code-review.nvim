@@ -1,13 +1,41 @@
 -- Re-anchoring threads to code that may have moved or changed.
 -- Order: stored position -> exact text search (context breaks ties) ->
 -- fuzzy line similarity -> give up (thread becomes "outdated").
+--
+-- A thread is on whole lines (range = { start, end }), or on the text selected
+-- in them: range.start_col / range.end_col are 1-based bytes, the end inclusive,
+-- on the first and the last line; anchor.span holds that text ("\n" between
+-- lines). When the text cannot be found again, the thread keeps its lines.
 local M = {}
 
 M.CONTEXT = 2
 M.THRESHOLD = 0.8
 
----Snapshot lines [s, e] (1-based, inclusive) plus surrounding context.
-function M.capture(lines, s, e)
+---The columns of a thread on selected text, or nil for a thread on whole lines.
+---@return integer? start_col, integer? end_col
+function M.cols(t)
+  local r = t and t.range or {}
+  if type(r.start_col) == "number" and type(r.end_col) == "number" and r.start_col >= 1 and r.end_col >= 1 then
+    return r.start_col, r.end_col
+  end
+end
+
+---The text from (s, sc) to (e, ec): 1-based, both ends inclusive.
+function M.span_text(lines, s, e, sc, ec)
+  if s == e then
+    return (lines[s] or ""):sub(sc, ec)
+  end
+  local out = { (lines[s] or ""):sub(sc) }
+  for i = s + 1, e - 1 do
+    out[#out + 1] = lines[i] or ""
+  end
+  out[#out + 1] = (lines[e] or ""):sub(1, ec)
+  return table.concat(out, "\n")
+end
+
+---Snapshot lines [s, e] (1-based, inclusive) plus surrounding context, and the
+---selected text when `sc`/`ec` are given.
+function M.capture(lines, s, e, sc, ec)
   local a = { text = {}, context_before = {}, context_after = {} }
   for i = s, e do
     a.text[#a.text + 1] = lines[i] or ""
@@ -18,7 +46,52 @@ function M.capture(lines, s, e)
   for i = e + 1, math.min(#lines, e + M.CONTEXT) do
     a.context_after[#a.context_after + 1] = lines[i]
   end
+  if sc and ec then
+    a.span = M.span_text(lines, s, e, sc, ec)
+  end
   return a
+end
+
+---Where `span` is in lines [s, e]: it must start on line s and end on line e.
+---The occurrence nearest to column `near` of line s wins.
+---@return integer? start_col, integer? end_col
+function M.locate_span(lines, s, e, span, near)
+  if type(span) ~= "string" or span == "" then
+    return nil
+  end
+  local block = table.concat(vim.list_slice(lines, s, e), "\n")
+  local first_len, last_start = #(lines[s] or ""), #block - #(lines[e] or "") + 1
+  local best, best_d
+  local from = 1
+  while true do
+    local p, q = block:find(span, from, true)
+    if not p then
+      break
+    end
+    if p <= math.max(first_len, 1) and q >= last_start then
+      local d = math.abs(p - (near or 1))
+      if not best or d < best_d then
+        best, best_d = p, d
+      end
+    end
+    from = p + 1
+  end
+  if not best then
+    return nil
+  end
+  return best, best + #span - 1 - (last_start - 1)
+end
+
+---Put thread `t` on lines [s, e] of `lines`, on its selected text when that is
+---still there (else on the whole lines).
+function M.place(t, lines, s, e)
+  local sc = M.cols(t)
+  local ec
+  if sc then
+    sc, ec = M.locate_span(lines, s, e, (t.anchor or {}).span, sc)
+  end
+  t.range = { start = s, ["end"] = e, start_col = sc, end_col = ec }
+  t.anchor = M.capture(lines, s, e, sc, ec)
 end
 
 local function block_eq(lines, s, text)
@@ -149,8 +222,7 @@ function M.reanchor_threads(threads, lines)
     end
     if s then
       if how ~= "exact" then
-        t.range = { start = s, ["end"] = e }
-        t.anchor = M.capture(lines, s, e)
+        M.place(t, lines, s, e)
         changed = true
       end
       if t.status == "outdated" then

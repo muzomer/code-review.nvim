@@ -122,7 +122,9 @@ function M.render()
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
   cr().color_authors(buf, lines)
-  vim.wo[win].winbar = t and string.format(" %%#Title#%s%%* · %s:%d ", t.id, t.file, t.range.start) or ""
+  local quote = t and require("code-review").quote(t, 40)
+  vim.wo[win].winbar = t and string.format(" %%#Title#%s%%* · %s:%d%s ", t.id, t.file, t.range.start,
+    quote and (" " .. quote:gsub("%%", "%%%%")) or "") or ""
   vim.wo[state.input.win].winbar = input_bar()
   pcall(api.nvim_win_set_cursor, win, { #lines, 0 }) -- the newest message in view
 end

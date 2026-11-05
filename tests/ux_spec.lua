@@ -336,6 +336,25 @@ describe("UX", function()
     end)
   end)
 
+  describe("comments on selected text", function()
+    case("in the unified view: stored on the new side, highlighted on its row", function()
+      ac.config.diff_layout = "unified"
+      diff.show_file(root, "src/calc.lua", "new", 4)
+      local buf = api.nvim_get_current_buf()
+      local row = require("code-review.unified").row_of(buf, "new", 4) -- "  return a + b + 0", an added row
+      ac.add(row, row, { 16, 18 }) -- "+ 0"
+      api.nvim_buf_set_lines(0, 0, -1, false, { "why + 0?" })
+      api.nvim_feedkeys(api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+      local t = store.read(root).threads[1]
+      eq({ t.side, t.range, t.anchor.span }, { nil, { start = 4, ["end"] = 4, start_col = 16, end_col = 18 }, "+ 0" })
+      ac.render(buf)
+      local spans = vim.tbl_filter(function(m) return m[4].hl_group == "CodeReviewSpan" end,
+        api.nvim_buf_get_extmarks(buf, api.nvim_create_namespace("code-review"), 0, -1, { details = true }))
+      eq(#spans, 1)
+      eq({ spans[1][2], spans[1][3], spans[1][4].end_col }, { row - 1, 15, 18 })
+    end)
+  end)
+
   describe("mouse", function()
     case("a click in the gutter of a commented line hits its thread; text clicks do not", function()
       local id = thread("src/calc.lua", 4, "why + 0?")

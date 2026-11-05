@@ -41,12 +41,12 @@ from `:terminal` find it.
 
 | Key / command                                          | Action                                                                                                       |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `<leader>ca` (normal / visual)                         | comment on the line / selection                                                                              |
-| `<leader>cr`                                           | open the thread under the cursor                                                                             |
+| `<leader>ca` (normal / visual)                         | comment on the line; in visual mode `v` on the selected text, `V` on the selected lines                      |
+| `<leader>cr`                                           | open the thread under the cursor; with several on the line, the one whose text you are on, else a picker     |
 | `<leader>ce` (`:CodeReview edit`)                      | edit your last comment of the thread under the cursor, until the agent replies                               |
 | `<leader>cx`                                           | resolve / reopen the thread under the cursor                                                                 |
 | `:CodeReview delete`                                   | delete the thread under the cursor                                                                           |
-| `]r` / `[r`                                            | next / previous thread in the buffer (wraps, takes a count)                                                  |
+| `]r` / `[r`                                            | next / previous thread in the buffer, one stop per thread (wraps, takes a count)                             |
 | `]u` / `[u`                                            | next / previous thread waiting for you (the agent replied), across files                                     |
 | `<C-l>` or `<leader>cl` (`:CodeReview list [yours]`)   | toggle the thread list (quickfix): those waiting for you first; `yours` shows only those                     |
 | `<C-S-l>` or `<leader>cL` (`:CodeReview list all`)     | the same with resolved threads                                                                               |
@@ -212,7 +212,10 @@ needs: agent|user|none, messages: [{id, author, ts, body}]}`. `needs` is
   file is loaded, or when an agent runs `list`/`show`, threads are relocated:
   stored position → exact text search (context breaks ties) → fuzzy match
   (≥ 0.8 bigram similarity) → otherwise `outdated` (shown dimmed, recovers if
-  the code comes back).
+  the code comes back). A thread on selected text also stores that text
+  (`anchor.span`) and its columns (`range.start_col` / `range.end_col`, 1-based
+  bytes, end inclusive): it is found again inside its lines, and when the text
+  is gone the thread stays on the whole lines.
 
 ## Configuration
 
@@ -222,7 +225,7 @@ Every option with its default. Pass only the ones you change.
 require("code-review").setup({
   -- Keys: each one a key, a list of keys, or false to skip it; `keymaps = false` for none.
   keymaps = {
-    add = "<leader>ca",         -- comment on the line (normal) / selection (visual)
+    add = "<leader>ca",         -- comment on the line (normal) / selected text (v) / lines (V)
     open = "<leader>cr",        -- open the thread under the cursor
     edit = "<leader>ce",        -- edit your last comment, until the agent replies
     resolve = "<leader>cx",     -- resolve / reopen

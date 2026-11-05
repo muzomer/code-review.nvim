@@ -14,7 +14,7 @@ local M = {}
 M.config = {
   -- Every binding is a key, a list of keys ({ "<C-l>", "<leader>cl" }), or false for none.
   keymaps = {
-    add = "<leader>ca", -- normal: current line, visual: selection
+    add = "<leader>ca", -- normal: current line, visual: the selected text (v) or lines (V)
     open = "<leader>cr", -- open thread under cursor (reply from there)
     edit = "<leader>ce", -- edit your last comment of the thread under the cursor
     poke = "<leader>cp", -- poke the agent to check your comments
@@ -191,7 +191,8 @@ local function queue_notification(n)
 end
 local group = api.nvim_create_augroup("code-review", { clear = true })
 local did_setup = false
-local marks = {} -- buf -> { [extmark id] = thread id }
+local marks = {} -- buf -> { [extmark id] = thread id } (the lines of each thread)
+local span_marks = {} -- buf -> { [extmark id] = thread id } (the selected text, for threads that have one)
 local watchers = {} -- root -> { handle, timer }
 local seen = {} -- root -> { [thread id] = message count }
 local float -- { buf, win, root, tid }
@@ -440,17 +441,28 @@ local function try_update(root, fn)
   return true, res
 end
 
----Where the extmarks say each tracked thread is now (1-based), or false when
----its code was deleted. Reflects unsaved edits.
+---Where the extmarks say each tracked thread is now, or false when its code was
+---deleted: { first, last } lines (1-based), plus { ..., start_col, end_col }
+---while its selected text is still there (then its lines are that text's).
+---Reflects unsaved edits.
 local function live_positions(buf)
   local pos = {}
   for _, tid in pairs(marks[buf] or {}) do
     pos[tid] = false -- a mark that vanished counts as deleted code
   end
+  local spans = {}
   for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
     local tid = marks[buf] and marks[buf][m[1]]
+    local stid = span_marks[buf] and span_marks[buf][m[1]]
     if tid and not m[4].invalid then
       pos[tid] = { m[2] + 1, m[4].end_row + 1 }
+    elseif stid and not m[4].invalid and (m[4].end_row > m[2] or m[4].end_col > m[3]) then
+      spans[stid] = { m[2] + 1, m[4].end_row + 1, m[3] + 1, m[4].end_col }
+    end
+  end
+  for tid, sp in pairs(spans) do
+    if pos[tid] then -- text left, lines left too
+      pos[tid] = sp
     end
   end
   for tid in pairs(lost[buf] or {}) do
@@ -458,6 +470,34 @@ local function live_positions(buf)
   end
   return pos
 end
+
+---The threads on row `row` (0-based) of `buf`, in order, and of those the ones
+---whose selected text holds column `col` (0-based), smallest first.
+---@return string[] on_row, string[] inside
+local function threads_at(buf, row, col)
+  local on_row, inside, seen = {}, {}, {}
+  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, { row, 0 }, { row, -1 }, { details = true, overlap = true })) do
+    local d = m[4]
+    local tid = marks[buf] and marks[buf][m[1]]
+    local stid = span_marks[buf] and span_marks[buf][m[1]]
+    if d.invalid then -- the code was deleted (not saved yet)
+    elseif tid and not seen[tid] then
+      seen[tid] = true
+      on_row[#on_row + 1] = tid
+    elseif stid and col then
+      local after_start = row > m[2] or col >= m[3]
+      local before_end = row < d.end_row or col < d.end_col
+      if after_start and before_end then
+        inside[#inside + 1] = { tid = stid, size = (d.end_row - m[2]) * 1e9 + d.end_col - m[3] }
+      end
+    end
+  end
+  table.sort(inside, function(a, b) return a.size < b.size end)
+  return on_row, vim.tbl_map(function(x) return x.tid end, inside)
+end
+
+-- Which sign color wins when several threads start on one line.
+local URGENCY = { CodeReviewNeedsUser = 4, CodeReviewNeedsAgent = 3, CodeReviewAgent = 2, CodeReviewDim = 1 }
 
 ---@param reanchor? boolean relocate threads against buffer text first
 function M.render(buf, reanchor)
@@ -505,22 +545,44 @@ function M.render(buf, reanchor)
   -- With unsaved edits the stored ranges are stale; keep where the marks went.
   local live = (not reanchor and vim.bo[buf].modified) and live_positions(buf) or {}
   api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  marks[buf], lost[buf] = {}, {}
+  marks[buf], span_marks[buf], lost[buf] = {}, {}, {}
   local n = api.nvim_buf_line_count(buf)
+  local shown, on_row, row_hl = {}, {}, {} -- per row: how many threads start there, the most urgent color
   for _, t in ipairs(threads) do
     local p = live[t.id]
     if p == false then
       lost[buf][t.id] = true
     elseif t.status ~= "resolved" or M.config.show_resolved then
-      local r = p or { t.range.start, t.range["end"] }
+      local r = p or { t.range.start, t.range["end"], anchor.cols(t) }
       if side == "both" and not p then -- unified view: the thread's side and line → buffer row
         local u, ts = require("code-review.unified"), t.side or "new"
         local first = u.row_of(buf, ts, t.range.start) or 1
-        r = { first, u.row_of(buf, ts, t.range["end"]) or first }
+        local last = u.row_of(buf, ts, t.range["end"])
+        r = { first, last or first, last and r[3], last and r[4] }
       end
       local s = math.max(1, math.min(r[1], n)) - 1
       local e = math.max(s + 1, math.min(r[2], n)) - 1
+      shown[#shown + 1] = { t = t, s = s, e = e, sc = r[3], ec = r[4] }
+      on_row[s] = (on_row[s] or 0) + 1
+      local _, hl = style(t)
+      if (URGENCY[hl] or 0) > (URGENCY[row_hl[s]] or 0) then
+        row_hl[s] = hl
+      end
+    end
+  end
+  local signed = {} -- rows whose sign is set: the first thread there shows the count
+  for _, it in ipairs(shown) do
+    local t, s, e = it.t, it.s, it.e
+    do
       local sign, sign_hl, virt_hl = style(t)
+      local gutter = sign
+      if signed[s] then
+        gutter = nil
+      elseif on_row[s] > 1 then
+        gutter = on_row[s] > 9 and "9+" or tostring(on_row[s])
+        sign_hl = row_hl[s] -- the count takes the color of the thread that needs you most
+      end
+      signed[s] = true
       local last = t.messages[#t.messages]
       local label = string.format(" %s: %s", last.author, first_line(last.body))
       if #t.messages > 1 then
@@ -543,14 +605,27 @@ function M.render(buf, reanchor)
       local id = api.nvim_buf_set_extmark(buf, ns, s, 0, {
         end_row = e,
         end_col = #end_line,
-        sign_text = sign,
-        sign_hl_group = sign_hl,
+        sign_text = gutter,
+        sign_hl_group = gutter and sign_hl or nil,
         virt_text = not inline and chunks or nil,
         virt_text_pos = not inline and "eol" or nil,
         invalidate = true,
         priority = 20,
       })
       marks[buf][id] = t.id
+      -- the selected text: only while it still fits the lines (stale columns must not throw)
+      local start_line = api.nvim_buf_get_lines(buf, s, s + 1, false)[1] or ""
+      local sc, ec = it.sc, it.ec and math.min(it.ec, #end_line)
+      if sc and ec and t.status ~= "outdated" and sc <= #start_line and (e > s or ec >= sc) then
+        local sid = api.nvim_buf_set_extmark(buf, ns, s, sc - 1, {
+          end_row = e,
+          end_col = ec,
+          hl_group = t.status == "resolved" and "CodeReviewSpanResolved" or "CodeReviewSpan",
+          invalidate = true,
+          priority = 21,
+        })
+        span_marks[buf][sid] = t.id
+      end
       if inline then
         -- the conversation goes under the last commented line
         api.nvim_buf_set_extmark(buf, ns, e, 0, { virt_lines = M.inline_lines(t, text_width(buf)), priority = 20 })
@@ -585,12 +660,11 @@ function M.mouse_thread(pos)
     return nil -- a click in the text itself: leave it alone
   end
   local buf = api.nvim_win_get_buf(pos.winid)
-  local row = pos.line - 1
-  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, { row, 0 }, { row, -1 }, { details = true, overlap = true })) do
-    local tid = marks[buf] and marks[buf][m[1]]
-    if tid then
-      return (buf_info(buf)), tid
-    end
+  local on_row = threads_at(buf, pos.line - 1)
+  if #on_row == 1 then
+    return (buf_info(buf)), on_row[1]
+  elseif #on_row > 1 then
+    return (buf_info(buf)), nil, on_row
   end
 end
 
@@ -600,10 +674,14 @@ function M.map_mouse(buf)
   end
   vim.b[buf].code_review_mouse = true
   vim.keymap.set("n", "<LeftMouse>", function()
-    local r, tid = M.mouse_thread(vim.fn.getmousepos())
-    if tid then
+    local r, tid, many = M.mouse_thread(vim.fn.getmousepos())
+    if tid or many then
       vim.schedule(function()
-        M.open_thread(r, tid)
+        if tid then
+          M.open_thread(r, tid)
+        else
+          M.pick_thread(r, many, M.open_thread)
+        end
       end)
     end
     return "<LeftMouse>" -- the click itself still happens
@@ -652,9 +730,11 @@ function M.sync_from_marks(buf)
             changed = true
           end
         else
-          local a = anchor.capture(lines, p[1], p[2])
-          if p[1] ~= t.range.start or p[2] ~= t.range["end"] or not vim.deep_equal(a, t.anchor) then
-            t.range = { start = p[1], ["end"] = p[2] }
+          -- p[3], p[4]: where the selected text went (nil: it was deleted, the lines stay)
+          local range = { start = p[1], ["end"] = p[2], start_col = p[3], end_col = p[4] }
+          local a = anchor.capture(lines, p[1], p[2], p[3], p[4])
+          if not vim.deep_equal(range, t.range) or not vim.deep_equal(a, t.anchor) then
+            t.range = range
             t.anchor = a
             changed = true
           end
@@ -892,8 +972,9 @@ end
 function M.thread_markdown(t)
   local r = t.range
   local loc = r.start == r["end"] and tostring(r.start) or (r.start .. "-" .. r["end"])
+  local quote = M.quote(t, 60)
   local lines = {
-    string.format("`%s:%s` · %s · needs %s", t.file, loc, t.status, t.needs),
+    string.format("`%s:%s`%s · %s · needs %s", t.file, loc, quote and (" on " .. quote) or "", t.status, t.needs),
     "",
   }
   local code = (t.anchor or {}).text or {}
@@ -1073,7 +1154,8 @@ function M.open_thread(root, tid, refresh)
       local count = vim.v.count1
       api.nvim_set_current_win(src_win)
       M.jump(dir, count)
-      local r2, t2 = M.thread_at_cursor()
+      local r2, t2, many = M.thread_at_cursor()
+      t2 = t2 or (many and many[1])
       if t2 then
         M.open_thread(r2, t2)
       end
@@ -1492,19 +1574,128 @@ function M.toggle_auto_poke()
   end
 end
 
+local last_jump -- { buf, row, col, tid }: the thread ]r / [r landed on
+
+---The thread under the cursor: the one ]r / [r just landed on, else the
+---smallest selected text the cursor is in, else the only thread on the line.
+---When the line has several, `tid` is nil and `many` lists them.
+---@return string? root, string? tid, string[]? many
 function M.thread_at_cursor()
   local buf = api.nvim_get_current_buf()
   local root = buf_info(buf)
-  local row = api.nvim_win_get_cursor(0)[1] - 1
-  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
-    local tid = marks[buf] and marks[buf][m[1]]
-    if tid and row >= m[2] and row <= (m[4].end_row or m[2]) then
-      return root, tid
-    end
+  local cur = api.nvim_win_get_cursor(0)
+  local row, col = cur[1] - 1, cur[2]
+  local on_row, inside = threads_at(buf, row, col)
+  local j = last_jump
+  if j and j.buf == buf and j.row == row and j.col == col and vim.tbl_contains(on_row, j.tid) then
+    return root, j.tid
+  end
+  if inside[1] then
+    return root, inside[1]
+  end
+  if #on_row == 1 then
+    return root, on_row[1]
+  end
+  if #on_row > 1 then
+    return root, nil, on_row
   end
 end
 
-function M.add(line1, line2)
+---Let the user pick one of the threads `tids` (all on one line), then fn(root, tid).
+function M.pick_thread(root, tids, fn)
+  local data = safe_read(root)
+  local items = {}
+  for _, tid in ipairs(tids) do
+    local t = data and store.find(data, tid)
+    if t then
+      items[#items + 1] = t
+    end
+  end
+  if #items == 0 then
+    return
+  end
+  local width = 0
+  local whats = {}
+  for i, t in ipairs(items) do
+    local r = t.range
+    whats[i] = M.quote(t, 30) or (r.start == r["end"] and "whole line" or string.format("whole lines %d–%d", r.start, r["end"]))
+    width = math.max(width, vim.fn.strdisplaywidth(whats[i]))
+  end
+  local index = {}
+  for i, t in ipairs(items) do
+    index[t] = i
+  end
+  vim.ui.select(items, {
+    prompt = string.format("%d threads on this line:", #items),
+    format_item = function(t)
+      local what = whats[index[t]]
+      local last = t.messages[#t.messages]
+      local who = last.author == "user" and "you" or last.author
+      return string.format("%s%s   %s: %s", what, string.rep(" ", width - vim.fn.strdisplaywidth(what)), who, first_line(last.body))
+    end,
+  }, function(t)
+    if t then
+      fn(root, t.id)
+    end
+  end)
+end
+
+---Run fn(root, tid) on the thread under the cursor, asking which one when the
+---line has several.
+function M.with_thread_at_cursor(fn)
+  local root, tid, many = M.thread_at_cursor()
+  if tid then
+    return fn(root, tid)
+  end
+  if not many then
+    return notify("no thread under cursor", vim.log.levels.WARN)
+  end
+  M.pick_thread(root, many, fn)
+end
+
+---Columns of a character selection from (line1, c1) to (line2, c2) (1-based,
+---as getpos() gives them), fitted to `lines`: the end goes to the last byte of
+---its character; past the end of a line ($) means its end. nil when the
+---selection is better kept as whole lines (empty, or every column of them).
+---@return integer? start_col, integer? end_col
+function M.selection_cols(lines, line1, line2, c1, c2)
+  local first, last = lines[line1] or "", lines[line2] or ""
+  if #first == 0 or #last == 0 then
+    return nil
+  end
+  local sc = math.max(1, math.min(c1, #first))
+  local ec = math.min(c2, #last)
+  if vim.o.selection == "exclusive" and c2 <= #last then
+    ec = ec - 1
+  end
+  if ec < 1 then
+    return nil
+  end
+  ec = ec + vim.str_utf_end(last, ec) -- a multibyte character is selected whole
+  sc = sc + vim.str_utf_start(first, sc)
+  if (line1 == line2 and ec < sc) or (sc == 1 and ec == #last) then
+    return nil
+  end
+  return sc, ec
+end
+
+---Short quote of a thread's selected text, for titles: `"retry_delay_ms * …"`.
+function M.quote(t, max)
+  local span = anchor.cols(t) and (t.anchor or {}).span
+  if not span then
+    return nil
+  end
+  span = vim.trim(span:gsub("%s+", " "))
+  max = max or 40
+  if vim.fn.strchars(span) > max then
+    span = vim.fn.strcharpart(span, 0, max - 1) .. "…"
+  end
+  return '"' .. span .. '"'
+end
+
+---Comment on lines line1..line2, or on the selected text in them when `cols`
+---({ c1, c2 }, from getpos()) is given.
+function M.add(line1, line2, cols)
   local buf = api.nvim_get_current_buf()
   local root, rel, side = buf_info(buf)
   if not root then
@@ -1515,7 +1706,11 @@ function M.add(line1, line2)
   end
   if side == "both" then -- unified view: rows → the side and lines they show
     local why
+    local rows = line2 - line1
     side, line1, line2 = require("code-review.unified").translate(buf, line1, line2)
+    if side and line2 - line1 ~= rows then
+      cols = nil -- the selection crossed removed and added rows: keep the lines
+    end
     if not side then
       why = line1 -- translate's reason, when it has one
       return notify(type(why) == "string" and why or "this line only existed in your last review; comment on the current code",
@@ -1528,7 +1723,13 @@ function M.add(line1, line2)
   local pr = session.load(root)
   local base = side == "old" and pr and pr.base_sha or nil
   local where = side == "old" and " (old side)" or ""
-  input(string.format("Comment on %s:%d-%d%s", rel, line1, line2, where), function(body, now)
+  local sc, ec
+  if cols then
+    sc, ec = M.selection_cols(lines, line1, line2, cols[1], cols[2])
+  end
+  local a = anchor.capture(lines, line1, line2, sc, ec)
+  local quote = M.quote({ range = { start_col = sc, end_col = ec }, anchor = a })
+  input(string.format("Comment on %s:%d-%d%s%s", rel, line1, line2, where, quote and (" " .. quote) or ""), function(body, now)
     local saved, tid = try_update(root, function(data)
       return store.add_thread(data, {
         file = rel,
@@ -1536,7 +1737,9 @@ function M.add(line1, line2)
         base = base,
         start = line1,
         ["end"] = line2,
-        anchor = anchor.capture(lines, line1, line2),
+        start_col = sc,
+        end_col = ec,
+        anchor = a,
         author = "user",
         body = body,
       })
@@ -1760,6 +1963,8 @@ local function thread_list(root, data, mode)
       filename = session.thread_path(root, t),
       lnum = t.range.start,
       end_lnum = t.range["end"],
+      col = anchor.cols(t), -- the selected text, for threads that have one
+      end_col = select(2, anchor.cols(t)),
       type = w.type, -- warning / info: Trouble, fzf-lua etc. color by it
       text = turn .. " · " .. rest, -- what other tools show
       user_data = t.id,
@@ -1884,43 +2089,95 @@ end
 ---skipped unless show_resolved is on).
 function M.jump(dir, count)
   local buf = api.nvim_get_current_buf()
-  local rows, seen_rows = {}, {}
-  for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
-    if marks[buf] and marks[buf][m[1]] and not m[4].invalid and not seen_rows[m[2]] then
-      seen_rows[m[2]] = true
-      rows[#rows + 1] = m[2]
+  -- one stop per thread: its selected text, else its first line
+  local by_tid, stops = {}, {}
+  for i, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+    local tid = marks[buf] and marks[buf][m[1]]
+    local stid = span_marks[buf] and span_marks[buf][m[1]]
+    if m[4].invalid then
+    elseif tid and not by_tid[tid] then
+      by_tid[tid] = { tid = tid, row = m[2], i = i }
+      stops[#stops + 1] = by_tid[tid]
+    elseif stid then
+      by_tid[stid] = by_tid[stid] or { tid = stid, i = i }
+      by_tid[stid].span = { m[2], m[3] }
     end
   end
-  if #rows == 0 then
+  stops = vim.tbl_filter(function(st) return st.row ~= nil end, stops)
+  if #stops == 0 then
     return notify("no comments in this buffer")
   end
-  table.sort(rows)
-  local cur = api.nvim_win_get_cursor(0)[1] - 1
-  local target = cur
+  for _, st in ipairs(stops) do
+    if st.span then
+      st.row, st.col = st.span[1], st.span[2]
+    end
+  end
+  -- by row; on a row, threads on whole lines first, then by column
+  table.sort(stops, function(a, b)
+    if a.row ~= b.row then
+      return a.row < b.row
+    end
+    if (a.col == nil) ~= (b.col == nil) then
+      return a.col == nil
+    end
+    if a.col ~= b.col then
+      return a.col < b.col
+    end
+    return a.i < b.i
+  end)
+  -- where a stop is from the cursor: a thread on whole lines is compared by row only
+  local function cmp(st, row, col)
+    if st.row ~= row then
+      return st.row < row and -1 or 1
+    end
+    if st.col == nil then
+      return 0
+    end
+    return st.col < col and -1 or st.col > col and 1 or 0
+  end
+  local cur = api.nvim_win_get_cursor(0)
+  local row, col = cur[1] - 1, cur[2]
+  local at -- index of the stop ]r / [r last landed on, when the cursor is still there
+  local j = last_jump
+  if j and j.buf == buf and j.row == row and j.col == col then
+    for k, st in ipairs(stops) do
+      if st.tid == j.tid then
+        at = k
+      end
+    end
+  end
+  local target
   for _ = 1, math.max(1, count or 1) do
     local nxt
-    if dir > 0 then
-      for _, r in ipairs(rows) do
-        if r > target then
-          nxt = r
+    if at then
+      nxt = (at - 1 + dir) % #stops + 1
+    elseif dir > 0 then
+      for k, st in ipairs(stops) do
+        if cmp(st, row, col) > 0 then
+          nxt = k
           break
         end
       end
-      nxt = nxt or rows[1]
+      nxt = nxt or 1
     else
-      for i = #rows, 1, -1 do
-        if rows[i] < target then
-          nxt = rows[i]
+      for k = #stops, 1, -1 do
+        if cmp(stops[k], row, col) < 0 then
+          nxt = k
           break
         end
       end
-      nxt = nxt or rows[#rows]
+      nxt = nxt or #stops
     end
-    target = nxt
+    at, target = nxt, stops[nxt]
+    row, col = target.row, target.col or 0
   end
   vim.cmd("normal! m'") -- add to jumplist
-  api.nvim_win_set_cursor(0, { target + 1, 0 })
-  vim.cmd("normal! ^")
+  api.nvim_win_set_cursor(0, { target.row + 1, target.col or 0 })
+  if not target.col then
+    vim.cmd("normal! ^")
+  end
+  local pos = api.nvim_win_get_cursor(0)
+  last_jump = { buf = buf, row = pos[1] - 1, col = pos[2], tid = target.tid }
   M.flash()
 end
 
@@ -2006,11 +2263,7 @@ local subcommands = {
     M.add(o.line1, o.line2)
   end,
   open = function()
-    local root, tid = M.thread_at_cursor()
-    if not tid then
-      return notify("no thread under cursor", vim.log.levels.WARN)
-    end
-    M.open_thread(root, tid)
+    M.with_thread_at_cursor(M.open_thread)
   end,
   inline = function()
     M.toggle_inline()
@@ -2075,24 +2328,13 @@ local subcommands = {
     M.poke(root, { pick = o and o.fargs and o.fargs[2] == "pick" })
   end,
   edit = function()
-    local root, tid = M.thread_at_cursor()
-    if not tid then
-      return notify("no thread under cursor", vim.log.levels.WARN)
-    end
-    M.edit(root, tid)
+    M.with_thread_at_cursor(M.edit)
   end,
   resolve = function()
-    local root, tid = M.thread_at_cursor()
-    if not tid then
-      return notify("no thread under cursor", vim.log.levels.WARN)
-    end
-    M.toggle_resolved(root, tid)
+    M.with_thread_at_cursor(M.toggle_resolved)
   end,
   delete = function()
-    local root, tid = M.thread_at_cursor()
-    if tid then
-      M.delete(root, tid)
-    end
+    M.with_thread_at_cursor(M.delete)
   end,
   list = function(o)
     local arg = o.fargs[2]
@@ -2168,6 +2410,12 @@ local function highlights()
   set("CodeReviewVirt", "Comment")
   set("CodeReviewDim", "NonText")
   set("CodeReviewFlash", "IncSearch")
+  -- the selected text of a thread: underlined, so it shows on diff colors too
+  local function fg(name)
+    return (api.nvim_get_hl(0, { name = name, link = false }) or {}).fg
+  end
+  api.nvim_set_hl(0, "CodeReviewSpan", { underline = true, sp = fg("DiagnosticInfo"), default = true })
+  api.nvim_set_hl(0, "CodeReviewSpanResolved", { underdotted = true, sp = fg("NonText"), default = true })
   api.nvim_set_hl(0, "CodeReviewOutdated", { strikethrough = true, link = nil, default = true, fg = (api.nvim_get_hl(0, { name = "Comment", link = false }) or {}).fg })
   set("CodeReviewAuthorYou", "DiagnosticInfo") -- the same colors everywhere: thread window, inline, summary
   set("CodeReviewAuthorAgent", "DiagnosticHint")
@@ -2329,12 +2577,14 @@ function M.setup(opts)
       M.add(l, l)
     end, { desc = "Code review: add comment" })
     keys.set("x", km.add, function()
-      local a, b = vim.fn.line("v"), vim.fn.line(".")
-      if a > b then
-        a, b = b, a
+      -- v: the selected text; V and <C-v>: whole lines
+      local charwise = vim.fn.mode() == "v"
+      local p1, p2 = vim.fn.getpos("v"), vim.fn.getpos(".")
+      if p1[2] > p2[2] or (p1[2] == p2[2] and p1[3] > p2[3]) then
+        p1, p2 = p2, p1
       end
       api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
-      M.add(a, b)
+      M.add(p1[2], p2[2], charwise and { p1[3], p2[3] } or nil)
     end, { desc = "Code review: comment on selection" })
   end
   if km.open then

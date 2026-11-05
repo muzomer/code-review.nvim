@@ -149,6 +149,10 @@ function M.build(root, opts)
     local followup = seen[t.id] ~= nil or vim.iter(t.messages):any(function(m) return m.author ~= "user" end)
     counts[followup and "followup" or "new"] = counts[followup and "followup" or "new"] + 1
     local where = string.format("%s:%d-%d%s", t.file, t.range.start, t.range["end"], t.side == "old" and " (old side, base commit)" or "")
+    local span = require("code-review.anchor").cols(t) and (t.anchor or {}).span
+    if span then -- the comment is about this text in those lines
+      where = where .. string.format(' on "%s"', cut(span:gsub("\n", "⏎"), M.MAX_LINE))
+    end
     local parts = { string.format("[%s] %s — %s", t.id, where, followup and "follow-up" or "new") }
     local code = code_of(t)
     if code ~= "" then

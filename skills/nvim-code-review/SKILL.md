@@ -15,6 +15,8 @@ inside the project.
 1. List the threads waiting on you:
    `code-review list --needs agent`
    Each thread shows its file, line range, the commented code, and the messages.
+   A comment on part of a line also quotes that text (`on "…"`): the comment is
+   about that text, not the whole lines.
    Add `--json` for machine-readable output.
 2. For each thread:
    - Read the surrounding code in the file. Line numbers are current: the CLI
