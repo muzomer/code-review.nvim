@@ -378,6 +378,7 @@ function M.add_thread(data, o)
     file = o.file,
     side = o.side ~= "new" and o.side or nil,
     base = o.base,
+    commit = o.commit, -- commits review: the commit it was written on
     range = { start = o.start, ["end"] = o["end"], start_col = o.start_col, end_col = o.end_col },
     anchor = o.anchor,
     status = "open",

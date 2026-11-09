@@ -249,13 +249,13 @@ function M.reanchor_root(root)
     -- Threads sharing a file, side and base see the same text.
     local groups = {}
     for _, t in ipairs(data.threads) do
-      local key = table.concat({ t.file, t.side or "new", t.base or "" }, "\0")
+      local key = table.concat({ t.file, t.side or "new", t.base or "", t.commit or "" }, "\0")
       groups[key] = groups[key] or { threads = {}, t = t }
       table.insert(groups[key].threads, t)
     end
     local changed = false
     for _, g in pairs(groups) do
-      local lines = session.lines(root, g.t.file, { side = g.t.side, base = g.t.base })
+      local lines = session.lines(root, g.t.file, { side = g.t.side, base = g.t.base, commit = g.t.commit })
       changed = M.reanchor_threads(g.threads, lines) or changed
     end
     if not changed then

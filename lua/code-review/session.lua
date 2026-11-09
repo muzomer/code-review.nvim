@@ -6,6 +6,16 @@
 --   <root>/.code-review/session.json   { kind = "pr", owner, repo, number, base_sha, head_sha, cache }
 --   <cache>/base/<path>                file at the base commit
 --   <cache>/head/<path>                file at the head commit
+--
+-- A commits review (local commits, one at a time) lives outside the repo too:
+--
+--   <state>/local/<name>/<hash>/.code-review/session.json
+--       { kind = "commits", repo, range, cache_base, commits = { { sha, parent, subject, body, author, date, files? } },
+--         current, and the current commit's base_sha, head_sha, cache, files, base_ref, head_ref }
+--   <cache>/local/<name>/<hash>/<sha>/{base,head}/<path>   a commit's files, before and after
+--
+-- The current commit's fields sit at the top level, so the diff UI shows it like
+-- a PR. Threads carry the sha of the commit they were written on (`commit`).
 local store = require("code-review.store")
 
 local M = {}
@@ -30,13 +40,43 @@ function M.dirs(ref)
   return M.state_base() .. "/" .. rel, M.cache_base() .. "/" .. rel
 end
 
----Recognise a snapshot path: <cache>/<host>/<owner>/<repo>/pr-<n>/{base,head}/<file>.
----@return string? root, string? file, "old"|"new"? side
+---Session root and cache base of the commits review of the repo at `repo`.
+function M.local_dirs(repo)
+  repo = vim.fs.normalize(repo)
+  local name = (vim.fs.basename(repo):gsub("[^%w._-]", "_"))
+  local rel = string.format("local/%s/%s", name ~= "" and name or "repo", vim.fn.sha256(repo):sub(1, 10))
+  return M.state_base() .. "/" .. rel, M.cache_base() .. "/" .. rel
+end
+
+---Is `s` a review shown from snapshots (a PR, or local commits)?
+function M.is_snapshots(s)
+  return s ~= nil and (s.kind == "pr" or s.kind == "commits")
+end
+
+---Snapshot directory of commit `sha` in a commits review.
+function M.commit_cache(s, sha)
+  return s.cache_base .. "/" .. sha
+end
+
+---Directory an agent works in for this review: the repo of a commits review,
+---else the root itself.
+function M.workdir(root)
+  local s = M.load(root)
+  return s and s.kind == "commits" and s.repo or root
+end
+
+---Recognise a snapshot path: <cache>/<host>/<owner>/<repo>/pr-<n>/{base,head}/<file>,
+---or <cache>/local/<name>/<hash>/<sha>/{base,head}/<file> (local commits).
+---@return string? root, string? file, "old"|"new"? side, string? commit sha of a commits review
 function M.infer(path)
   path = vim.fs.normalize(path)
   local prefix = M.cache_base() .. "/"
   if path:sub(1, #prefix) ~= prefix then
     return nil
+  end
+  local name, hash, sha, ldir, lfile = path:sub(#prefix + 1):match("^local/([^/]+)/([^/]+)/(%x+)/(%a+)/(.+)$")
+  if name and (ldir == "base" or ldir == "head") then
+    return string.format("%s/local/%s/%s", M.state_base(), name, hash), lfile, ldir == "base" and "old" or "new", sha
   end
   local host, owner, repo, n, dir, file = path:sub(#prefix + 1):match("^([^/]+)/([^/]+)/([^/]+)/pr%-(%d+)/(%a+)/(.+)$")
   if not host or (dir ~= "base" and dir ~= "head") then
@@ -78,9 +118,9 @@ function M.reviews()
   return res
 end
 
----Absolute path to read a thread's file from (snapshot in PR sessions).
+---Absolute path to read a thread's file from (snapshot in PR and commits reviews).
 function M.thread_path(root, t)
-  return M.snapshot_path(root, t.file, t.side) or (root .. "/" .. t.file)
+  return M.snapshot_path(root, t.file, t.side, t.commit) or (root .. "/" .. t.file)
 end
 
 local function session_path(root)
@@ -109,14 +149,20 @@ function M.save(root, session)
   f:close()
 end
 
----Absolute path of the snapshot of `file` on `side`, or nil outside PR sessions.
+---Absolute path of the snapshot of `file` on `side`, or nil outside PR and
+---commits reviews. `commit`: that commit of a commits review (default: the current one).
 ---@param side? "old"|"new"
-function M.snapshot_path(root, file, side)
+---@param commit? string
+function M.snapshot_path(root, file, side, commit)
   local s = M.load(root)
-  if not s or s.kind ~= "pr" then
+  if not M.is_snapshots(s) then
     return nil
   end
-  return M.snapshot_path_in(s.cache, file, side)
+  local cache = s.cache
+  if s.kind == "commits" and commit then
+    cache = M.commit_cache(s, commit)
+  end
+  return M.snapshot_path_in(cache, file, side)
 end
 
 -- Viewed files ---------------------------------------------------------------
@@ -142,19 +188,59 @@ end
 
 ---Hash of what the reviewer sees for a changed file (new text, or old for a removal).
 ---@param f table entry of session.files
-local function content_hash(root, f)
-  local lines = M.lines(root, f.path, { side = f.status == "removed" and "old" or "new" })
+local function content_hash(root, f, commit)
+  local lines = M.lines(root, f.path, { side = f.status == "removed" and "old" or "new", commit = commit })
   return vim.fn.sha256(table.concat(lines or {}, "\n"))
 end
 
----@return table<string, boolean> viewed by path, for the files of a PR session
-function M.viewed_map(root)
+---Key of a file in viewed.json: its path, prefixed by the commit in a commits
+---review (the same file is reviewed again in every commit that changes it).
+local function viewed_key(s, path, commit)
+  if s and s.kind == "commits" then
+    return (commit or s.head_sha) .. ":" .. path
+  end
+  return path
+end
+
+---@param commit? string a commit of a commits review (default: the current one)
+---@return table<string, boolean> viewed by path, for the files of a PR session (or of that commit)
+function M.viewed_map(root, commit)
   local s = M.load(root)
   local saved, res = read_viewed(root), {}
-  for _, f in ipairs(s and s.files or {}) do
-    res[f.path] = saved[f.path] ~= nil and saved[f.path] == content_hash(root, f)
+  local files = s and s.files or {}
+  if s and s.kind == "commits" and commit and commit ~= s.head_sha then
+    files = {}
+    for _, c in ipairs(s.commits or {}) do
+      if c.sha == commit then
+        files = c.files or {}
+      end
+    end
+  end
+  for _, f in ipairs(files) do
+    local key = viewed_key(s, f.path, commit)
+    res[f.path] = saved[key] ~= nil and saved[key] == content_hash(root, f, commit)
   end
   return res
+end
+
+---Viewed marks of commits that were replaced: `moved` maps an old sha to the new one.
+function M.move_viewed(root, moved)
+  local saved = read_viewed(root)
+  local changed = false
+  for key, hash in pairs(vim.deepcopy(saved)) do
+    local sha, path = key:match("^(%x+):(.+)$")
+    if sha and moved[sha] then
+      saved[key] = nil
+      saved[moved[sha] .. ":" .. path] = hash -- still compared with the text: a changed file counts as not viewed
+      changed = true
+    end
+  end
+  if changed then
+    store.ensure_dir(root)
+    local out = assert(io.open(viewed_path(root), "w"))
+    out:write(vim.json.encode(saved), "\n")
+    out:close()
+  end
 end
 
 ---Mark (or unmark) a changed file as viewed.
@@ -170,7 +256,7 @@ function M.set_viewed(root, path, viewed)
     return false
   end
   local saved = read_viewed(root)
-  saved[path] = viewed and content_hash(root, entry) or nil
+  saved[viewed_key(s, path)] = viewed and content_hash(root, entry) or nil
   store.ensure_dir(root)
   local tmp = viewed_path(root) .. ".tmp." .. vim.uv.os_getpid()
   local out = assert(io.open(tmp, "w"))
@@ -187,11 +273,11 @@ local function read_file(path)
 end
 
 ---Lines of `file` as seen from `side` (default "new"), or nil when missing.
----@param opts? { side?: "old"|"new", base?: string }
+---@param opts? { side?: "old"|"new", base?: string, commit?: string }
 ---@return string[]?
 function M.lines(root, file, opts)
   opts = opts or {}
-  local snap = M.snapshot_path(root, file, opts.side)
+  local snap = M.snapshot_path(root, file, opts.side, opts.commit)
   if snap then
     return read_file(snap)
   end
