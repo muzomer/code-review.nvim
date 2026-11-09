@@ -6,6 +6,15 @@
 --   ▶✓ M jwt.py        +40 -12  ✎2
 --      A keys.py        +3       ✎1!
 --
+-- In a commits review the commits come first, the current one opened up:
+--
+--    main..HEAD · 5 commits · 1/5 reviewed
+--   ✓ 1 a3f02d1 refactor: split dispatcher
+--  ▶  2 b41c9e2 feat: retry webhooks      ✎1
+--       ▾ src/webhooks/
+--          M dispatcher.py  +4 -1
+--     3 c7d81aa fix: cap backoff
+--
 -- Rows are not file indexes (folders take rows too), so every rendered row is
 -- recorded in `rows[buf]`.
 local session = require("code-review.session")
@@ -116,17 +125,19 @@ function M.ordered(s)
 end
 
 ---Open threads per file: total and how many wait on the user (agent replied).
-local function thread_counts(root)
+---@param commit? string only the threads of this commit (commits review)
+---@param by? "file"|"commit" what to count them by (default file)
+local function thread_counts(root, commit, by)
   local ok, data = pcall(store.read, root)
   local res = {}
   for _, t in ipairs(ok and data.threads or {}) do
-    if t.status ~= "resolved" then
-      local c = res[t.file] or { open = 0, yours = 0 }
+    if t.status ~= "resolved" and (not commit or t.commit == commit) then
+      local c = res[by == "commit" and (t.commit or "") or t.file] or { open = 0, yours = 0 }
       c.open = c.open + 1
       if t.needs == "user" then
         c.yours = c.yours + 1
       end
-      res[t.file] = c
+      res[by == "commit" and (t.commit or "") or t.file] = c
     end
   end
   return res
@@ -187,6 +198,8 @@ local function map_keys(buf)
   keys.set("n", sk.close, function() M.close() end, o("close"))
   local km = require("code-review").config.keymaps or {}
   keys.set("n", km.next_file, function() diff().step(1) end, o("next unreviewed file"))
+  keys.set("n", km.next_commit, function() require("code-review.commits").step(vim.b[buf].code_review_sidebar, 1) end, o("next commit"))
+  keys.set("n", km.prev_commit, function() require("code-review.commits").step(vim.b[buf].code_review_sidebar, -1) end, o("previous commit"))
   keys.set("n", km.prev_file, function() diff().step(-1) end, o("previous unreviewed file"))
   keys.set("n", sk.description, function() diff().description(vim.b[buf].code_review_sidebar) end, o("PR description"))
   keys.set("n", sk.help, function() require("code-review").help("sidebar") end, o("help"))
@@ -197,7 +210,7 @@ local function new_buf(root)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].filetype = "codereview-files"
   vim.b[buf].code_review_sidebar = root
-  pcall(api.nvim_buf_set_name, buf, "code-review://files/" .. root:match("[^/]+/[^/]+/pr%-%d+$") or root)
+  pcall(api.nvim_buf_set_name, buf, "code-review://files/" .. (root:match("[^/]+/[^/]+/pr%-%d+$") or root:match("local/.+$") or root))
   map_keys(buf)
   return buf
 end
@@ -280,9 +293,10 @@ function M.render(root, shown)
   if not s then
     return
   end
+  local is_commits = s.kind == "commits"
   local all_files = M.ordered(s)
   local viewed = require("code-review.diff").viewed(root)
-  local counts = thread_counts(root)
+  local counts = thread_counts(root, is_commits and (s.current or "") or nil)
   local n_viewed = 0
   for _, f in ipairs(all_files) do
     if viewed[f.path] then
@@ -326,7 +340,8 @@ function M.render(root, shown)
   end
   -- icons get a fixed slot of 2 cells + space: Nerd Font glyphs often draw wider than they count
   local use_icons = M.icon("x.lua") ~= nil
-  local reserved = (has_dirs and 2 or 0) + 2 + 3 + (use_icons and 3 or 0) + (1 + w_add) + (1 + w_del) + w_threads
+  local nest = is_commits and 4 or 0 -- files sit under their commit
+  local reserved = nest + (has_dirs and 2 or 0) + 2 + 3 + (use_icons and 3 or 0) + (1 + w_add) + (1 + w_del) + w_threads
   w_name = math.max(8, math.min(w_name, api.nvim_win_get_width(win) - reserved))
   local function shorten(name)
     if vim.fn.strdisplaywidth(name) <= w_name then
@@ -352,10 +367,26 @@ function M.render(root, shown)
     return text .. string.rep(" ", math.max(0, w - vim.fn.strdisplaywidth(text)))
   end
 
-  local header = {
-    { " " .. string.format("%s/%s#%d", s.owner, s.repo, s.number), "Title" },
-    { string.format(" · %d/%d viewed", n_viewed, #all_files), "Comment" },
-  }
+  local header
+  local commits = is_commits and require("code-review.commits") or nil
+  if is_commits then
+    local done = 0
+    for _, c in ipairs(s.commits or {}) do
+      if commits.reviewed(root, c) then
+        done = done + 1
+      end
+    end
+    local n = #(s.commits or {})
+    header = {
+      { " " .. (s.range or "commits"), "Title" },
+      { string.format(" · %d commit%s · %d/%d reviewed", n, n == 1 and "" or "s", done, n), "Comment" },
+    }
+  else
+    header = {
+      { " " .. string.format("%s/%s#%d", s.owner, s.repo, s.number), "Title" },
+      { string.format(" · %d/%d viewed", n_viewed, #all_files), "Comment" },
+    }
+  end
   if mode ~= "all" then
     header[#header + 1] = { string.format(" · %s: %d", FILTER_LABEL[mode], #files), "WarningMsg" }
   end
@@ -367,14 +398,16 @@ function M.render(root, shown)
     local n = vim.tbl_count(diffmod.since(root))
     add({ { string.format(" ↻ %d file%s changed since your last review · S", n, n == 1 and "" or "s"), "Comment" } })
   end
+  local ind = string.rep(" ", nest)
+  local function file_rows()
   if #files == 0 then
-    add({ { "   no files match (f: next filter)", "Comment" } })
+    add({ { ind .. "   " .. (#all_files == 0 and "no files changed" or "no files match (f: next filter)"), "Comment" } })
   end
   local groups, order = tree(files)
   local fold = collapsed[root] or {}
   for _, dir in ipairs(order) do
     if dir ~= "" then
-      add({ { (fold[dir] and " ▸ " or " ▾ ") .. dir .. "/", "Directory" } }, { kind = "dir", dir = dir })
+      add({ { ind .. (fold[dir] and " ▸ " or " ▾ ") .. dir .. "/", "Directory" } }, { kind = "dir", dir = dir })
     end
     if not fold[dir] then
       for _, f in ipairs(groups[dir]) do
@@ -385,7 +418,7 @@ function M.render(root, shown)
         -- snapshot_path_in with the session loaded above: snapshot_path would read
         -- session.json again for every row (seconds on a PR with thousands of files)
         local pieces = {
-          { dir ~= "" and "  " or "", nil },
+          { ind .. (dir ~= "" and "  " or ""), nil },
           { current[root] == f.path and "▶" or " ", "CodeReviewQfMarker" },
           { is_viewed and "✓" or (is_loading and not (vim.uv.fs_stat(session.snapshot_path_in(s.cache, f.path, f.status == "removed" and "old" or "new"))) and "…" or " "), "CodeReviewQfCheck" },
           { " " .. st[1] .. " ", st[2] },
@@ -409,6 +442,43 @@ function M.render(root, shown)
       end
     end
   end
+  end
+
+  if is_commits then
+    local by_commit = thread_counts(root, nil, "commit")
+    local n = #(s.commits or {})
+    local width = api.nvim_win_get_width(win)
+    for i, c in ipairs(s.commits or {}) do
+      local cur = c.sha == s.current
+      local tc = by_commit[c.sha]
+      local num = string.format(" %" .. #tostring(n) .. "d ", i)
+      local tail = tc and (#("  ✎" .. tc.open) - 2 + (tc.yours > 0 and 1 or 0)) or 0
+      local room = math.max(8, width - (2 + #num + 8 + tail))
+      local subject = c.subject or ""
+      if vim.fn.strdisplaywidth(subject) > room then
+        subject = vim.fn.strcharpart(subject, 0, room - 1) .. "…"
+      end
+      local pieces = {
+        { cur and "▶" or " ", "CodeReviewQfMarker" },
+        { commits.reviewed(root, c) and "✓" or " ", "CodeReviewQfCheck" },
+        { num, "Comment" },
+        { c.sha:sub(1, 7) .. " ", "Identifier" },
+        { pad(subject, room), cur and "Title" or nil },
+      }
+      if tc then
+        pieces[#pieces + 1] = { "  ✎" .. tc.open, tc.yours > 0 and "CodeReviewNeedsUser" or "CodeReviewNeedsAgent" }
+        if tc.yours > 0 then
+          pieces[#pieces + 1] = { "!", "CodeReviewNeedsUser" }
+        end
+      end
+      add(pieces, { kind = "commit", sha = c.sha })
+      if cur then
+        file_rows()
+      end
+    end
+  else
+    file_rows()
+  end
 
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -419,12 +489,19 @@ function M.render(root, shown)
   end
   rows[buf] = map
   -- the file in the diff gets a highlighted row, and the cursor when outside the sidebar
+  local file_row, commit_row
   for row, e in pairs(map) do
     if e.kind == "file" and e.path == current[root] then
-      api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = "CodeReviewQfCurrent", priority = 5 })
-      if api.nvim_get_current_win() ~= win then
-        pcall(api.nvim_win_set_cursor, win, { row, 0 })
-      end
+      file_row = row
+    elseif e.kind == "commit" and e.sha == s.current then
+      commit_row = row
+    end
+  end
+  local hl_row = file_row or commit_row -- the commit's row when none of its files is on screen
+  if hl_row then
+    api.nvim_buf_set_extmark(buf, ns, hl_row - 1, 0, { line_hl_group = "CodeReviewQfCurrent", priority = 5 })
+    if api.nvim_get_current_win() ~= win then
+      pcall(api.nvim_win_set_cursor, win, { hl_row, 0 })
     end
   end
 end
@@ -471,6 +548,9 @@ function M.activate()
   end
   if e.kind == "dir" then
     return M.toggle_dir()
+  end
+  if e.kind == "commit" then
+    return require("code-review.commits").show(root, e.sha)
   end
   require("code-review.diff").show_file(root, e.path)
 end

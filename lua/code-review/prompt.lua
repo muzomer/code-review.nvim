@@ -125,6 +125,11 @@ function M.build(root, opts)
   local seen = opts.all and {} or read_seen(root)
   local s = session.load(root)
   local pr = s and s.kind == "pr" and s or nil
+  local commits = s and s.kind == "commits" and s or nil
+  local subjects = {}
+  for _, c in ipairs(commits and commits.commits or {}) do
+    subjects[c.sha] = c.subject
+  end
   local ref = pr and string.format("%s/%s#%d", pr.owner, pr.repo, pr.number)
   local cli = ref and ("code-review --pr " .. ref) or "code-review"
   local function same(a, b)
@@ -165,6 +170,12 @@ function M.build(root, opts)
     local followup = seen[t.id] ~= nil or vim.iter(t.messages):any(function(m) return m.author ~= "user" end)
     counts[followup and "followup" or "new"] = counts[followup and "followup" or "new"] + 1
     local where = string.format("%s:%d-%d%s", t.file, t.range.start, t.range["end"], t.side == "old" and " (old side, base commit)" or "")
+    if commits and t.commit then
+      where = where .. string.format(' in commit %s ("%s")', t.commit:sub(1, 12), cut(subjects[t.commit] or "?", 60))
+      if t.side == "old" then
+        where = where:gsub(" %(old side, base commit%)", " (old side: the commit's parent)")
+      end
+    end
     local span = require("code-review.anchor").cols(t) and (t.anchor or {}).span
     if span then -- the comment is about this text in those lines
       where = where .. string.format(' on "%s"', cut(span:gsub("\n", "⏎"), M.MAX_LINE))
@@ -215,12 +226,22 @@ function M.build(root, opts)
     lines[#lines + 1] = string.format("There is no checkout: `%s diff` prints where the base/head snapshots of the changed files are;"
       .. " for any other file run `%s file <path>` and read the path it prints. You cannot change the PR,"
       .. " so answer with explanations or suggested code (a ```suggestion block replaces the commented lines).", cli, cli)
+  elseif commits then
+    lines[#lines + 1] = string.format("These comments are on commits of the repository at %s, reviewed one commit at a time;"
+      .. " each thread names its commit (`git show <sha>` shows it).", commits.repo)
+  end
+  local fixup = commits and (vim.uv.fs_stat(commits.repo .. "/.jj")
+      and " Put the change into the commit the thread is on with `jj squash --into <sha>`."
+      or " Commit the change as a fixup of the commit the thread is on (`git commit --fixup=<sha>`); do not rebase.")
+    or ""
+  if pr then
+    -- answered above: a PR cannot be changed
   elseif M.changes_mode() == "auto" then
-    lines[#lines + 1] = "Make the changes the comments ask for in the code, then reply."
+    lines[#lines + 1] = "Make the changes the comments ask for in the code, then reply." .. fixup
   else
     local any = any_approved
     if any then
-      lines[#lines + 1] = "For the threads marked `change approved`, make the changes they ask for in the code, then reply."
+      lines[#lines + 1] = "For the threads marked `change approved`, make the changes they ask for in the code, then reply." .. fixup
     end
     lines[#lines + 1] = (any and "For every other thread, do not edit any file" or "Do not edit any file")
       .. ", even if a comment asks for a change: the reviewer approves changes first. Answer, and when code should"
@@ -234,12 +255,19 @@ end
 function M.generic(root)
   local s = session.load(root)
   if not (s and s.kind == "pr") then
-    return "I left review comments on the code for you. Run `code-review list --needs agent` to see them"
-      .. " (`code-review skill` explains the workflow). Reply in each thread with `code-review reply <id> \"...\"`."
+    local cli = "code-review"
+    local intro = "I left review comments on the code for you."
+    if s and s.kind == "commits" then
+      cli = "code-review --root " .. (root:match("^[%w/._~-]+$") and root or vim.fn.shellescape(root))
+      intro = string.format("I am reviewing the commits %s of %s one at a time and left comments on them for you"
+        .. " (each thread names its commit).", s.range, s.repo)
+    end
+    return intro .. " Run `" .. cli .. " list --needs agent` to see them"
+      .. " (`code-review skill` explains the workflow). Reply in each thread with `" .. cli .. " reply <id> \"...\"`."
       .. (M.changes_mode() == "auto" and " Make any changes requested,"
         or " Change the code only for threads marked `change approved`; for the others answer and propose changes"
           .. " as a ```suggestion block,")
-      .. " and only resolve a thread with `code-review resolve <id>` once it is settled."
+      .. " and only resolve a thread with `" .. cli .. " resolve <id>` once it is settled."
   end
   local cli = string.format("code-review --pr %s/%s#%d", s.owner, s.repo, s.number)
   return string.format("I am reviewing PR %s/%s#%d in Neovim (no checkout) and left comments for you. Run `%s list --needs agent`"

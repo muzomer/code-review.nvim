@@ -128,6 +128,47 @@ read the same snapshots: `code-review --pr REF diff` prints their paths,
 `code-review --pr REF file <path>` fetches any other file. For lualine:
 `lualine_x = { require("code-review").lualine }`.
 
+## Reviewing commits one at a time
+
+`:CodeReview commits [range]` reviews the commits of a branch one by one, each
+against its parent, in the same diff tab as a PR. The range defaults to your
+default branch up to `HEAD` (`origin/HEAD`, else `main` or `master`), oldest
+commit first. It reads git directly, so a jj repo works when it is colocated
+with git.
+
+The sidebar lists the commits. The one on screen has its files under it:
+
+```
+ main..HEAD · 3 commits · 1/3 reviewed
+ ✓ 1 a3f02d1 refactor: split dispatcher
+▶  2 b41c9e2 feat: retry webhooks      ✎1
+      ▶  M dispatcher.py  +4 -1
+         A retry.py       +38
+   3 c7d81aa fix: cap backoff at 30s   ✎2
+```
+
+`✓` every file of the commit viewed · `▶` the commit on screen · `✎2` open threads
+
+| Key / command                                         | Action                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------- |
+| `<leader>co` (`:CodeReview commits [range]`)          | start or resume; asks for a range when the branch has no commits    |
+| `]C` / `[C` (`:CodeReview commits next\|prev`)        | next / previous commit                                              |
+| `<CR>` on a commit (sidebar)                          | show that commit                                                    |
+| `<leader>cC` (`:CodeReview commits pick`)             | pick a commit from a list                                           |
+| `]f` / `[f`                                           | next / previous file; past the last file, the next / previous commit |
+| `<leader>cv`                                          | mark the file viewed; once the commit is done, the next commit opens |
+| `<leader>cd`                                          | the commit message                                                  |
+| `U` in the sidebar                                    | read the range again (new or rewritten commits)                     |
+
+A comment belongs to the commit it was written on: it shows only there, and
+opening it from the thread list goes back to that commit. There is one review
+per repo, so the agent you picked and its session carry over from commit to
+commit. The agent works in the repo and is told which commit each thread is
+on. An approved change goes into that commit: with git as a fixup commit
+(`git commit --fixup`; the rebase is yours), in a jj repo with
+`jj squash --into`. When a commit is rewritten, `U` reads the range again and
+its threads and viewed marks move to the new commit with the same subject.
+
 ## Usage by agents
 
 ```sh
@@ -268,6 +309,10 @@ require("code-review").setup({
     description = "<leader>cd", -- PR title and description
     layout = "<leader>cu",      -- split / unified diff
     recent = "<leader>cR",      -- resume a recent PR review
+    -- commits reviews
+    next_commit = "]C", prev_commit = "[C", -- next / previous commit
+    commits = "<leader>co",     -- review the branch's commits one at a time
+    find_commit = "<leader>cC", -- pick a commit
     -- on a thread: the thread window, the thread list (quickfix) and the conversation panel
     thread = {
       reply = { "r", "i" }, edit = "e", send = "s", resolve = "x", approve = "a", delete = "d",

@@ -230,7 +230,7 @@ function cmds.add(root, pos, flags)
     error("comment body is empty", 0)
   end
   local pr = session.load(root)
-  local rel, lines, side, base
+  local rel, lines, side, base, commit
   if pr and pr.kind == "pr" then
     side = flags.side == "old" and "old" or nil
     if flags.side and flags.side ~= "old" and flags.side ~= "new" then
@@ -245,6 +245,14 @@ function cmds.add(root, pos, flags)
     end
     lines = session.lines(root, rel, { side = side })
     base = side == "old" and pr.base_sha or nil
+  elseif pr and pr.kind == "commits" then
+    side = flags.side == "old" and "old" or nil
+    rel = pr_rel(root, file)
+    commit = pr.current
+    lines = session.lines(root, rel, { side = side, commit = commit })
+    if not lines then
+      error(string.format("%s is not changed in the commit under review (%s)", rel, tostring(commit):sub(1, 7)), 0)
+    end
   else
     local abs
     rel, abs = to_rel(root, file)
@@ -266,6 +274,7 @@ function cmds.add(root, pos, flags)
       anchor = anchor.capture(lines, s, e),
       author = flags.author or "agent",
       body = body,
+      commit = commit,
     })
   end)
   emit(flags, { id = id }, "Created " .. id)

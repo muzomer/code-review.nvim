@@ -120,20 +120,26 @@ function M.args(root, text, opts)
   local a = M.adapter(opts.agent)
   local dirs = {}
   -- the snapshots of a PR review live in the cache, outside the session root
-  local s = require("code-review.session").load(root)
+  local session = require("code-review.session")
+  local s = session.load(root)
   local pr = s and s.kind == "pr"
   if pr and s.cache then
     dirs[1] = s.cache
   end
-  local cwd = opts.cwd or root
-  if not pr and vim.fs.normalize(cwd) ~= vim.fs.normalize(root) then
-    dirs[#dirs + 1] = root -- a fork runs where its session started: give it the reviewed project
+  local work = session.workdir(root) -- a commits review works in its repo
+  if work ~= root then
+    dirs[#dirs + 1] = s.cache_base -- the commits' snapshots
+    dirs[#dirs + 1] = root -- the comments
+  end
+  local cwd = opts.cwd or work
+  if not pr and vim.fs.normalize(cwd) ~= vim.fs.normalize(work) then
+    dirs[#dirs + 1] = work -- a fork runs where its session started: give it the reviewed project
   end
   local args = a.args({
     cmd = M.command(opts.agent), prompt = text, cwd = cwd, dirs = dirs, cfg = cfg(),
     new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
     -- a PR has no checkout to change; a local review only where the reviewer allows it
-    edit = not pr and may_edit(root) and root or nil,
+    edit = not pr and may_edit(root) and work or nil,
   })
   vim.list_extend(args, cfg().args or {})
   return args
@@ -261,7 +267,7 @@ start = function(root, text, on_start, retried, fork)
     or saved and ("resuming session " .. saved)
     or ("new session" .. (new_id and (" " .. new_id) or ""))
   push(run, { string.format("● %s · %s", a.name, first) })
-  local cwd = fork and fork.cwd or root -- agents file sessions by the directory they started in
+  local cwd = fork and fork.cwd or require("code-review.session").workdir(root) -- agents file sessions by the directory they started in
   local partial -- text streamed in pieces (delta events), shown as it grows
   local function flush()
     partial = nil
@@ -445,7 +451,8 @@ function M.chat(root)
   local buf = api.nvim_create_buf(false, true)
   api.nvim_win_set_buf(win, buf)
   local opts = {
-    cwd = root,
+    cwd = require("code-review.session").workdir(root),
+    env = { NVIM_CODE_REVIEW_ROOT = root }, -- the CLI finds this review from any directory
     on_exit = function()
       chats[root] = nil
     end,

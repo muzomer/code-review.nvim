@@ -351,7 +351,7 @@ function M.send(root, opts)
   end
   local function go(target)
     if target.pane_id == M.HEADLESS then
-      local text, sent = prompt.build(root, { style = "background", cwd = root, author = (require("code-review").config.headless or {}).agent or "claude" })
+      local text, sent = prompt.build(root, { style = "background", cwd = require("code-review.session").workdir(root), author = (require("code-review").config.headless or {}).agent or "claude" })
       return background(text, sent, target)
     end
     local adapter = require("code-review.agents").get(target.agent or "claude")

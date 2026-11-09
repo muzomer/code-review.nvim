@@ -164,7 +164,8 @@ function M.show(root, file, win, foldtext, opts)
   local buf = api.nvim_create_buf(false, true)
   pcall(api.nvim_buf_set_name, buf, name)
   vim.bo[buf].bufhidden = "wipe"
-  vim.b[buf].code_review_unified = { root = root, file = file }
+  local s = session.load(root)
+  vim.b[buf].code_review_unified = { root = root, file = file, commit = s and s.kind == "commits" and s.current or nil }
   local text = {}
   local d = { root = root, file = file, rows = rows, old = {}, new = {}, since = opts.since }
   for i, r in ipairs(rows) do

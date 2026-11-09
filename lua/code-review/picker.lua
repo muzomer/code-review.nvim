@@ -16,17 +16,19 @@ local STATUS = { added = "A", removed = "D", modified = "M", renamed = "R" }
 ---Each: { text = "head/lib/a.py:1: M +4 -3", file, side, line }
 function M.file_entries(root)
   local s = session.load(root)
-  if not s or s.kind ~= "pr" then
+  if not session.is_snapshots(s) then
     return {}
   end
+  -- a commits review's paths start at the commit (the picker runs in the cache of all commits)
+  local prefix = s.kind == "commits" and (s.current .. "/") or ""
   local viewed = require("code-review.diff").viewed(root)
   local res = {}
   for _, f in ipairs(require("code-review.sidebar").ordered(s)) do
     local side = f.status == "removed" and "old" or "new"
     res[#res + 1] = {
       text = string.format(
-        "%s/%s:1: %s +%d -%d%s",
-        side == "old" and "base" or "head", f.path, STATUS[f.status] or "?",
+        "%s%s/%s:1: %s +%d -%d%s",
+        prefix, side == "old" and "base" or "head", f.path, STATUS[f.status] or "?",
         f.additions or 0, f.deletions or 0, viewed[f.path] and "  ✓ viewed" or ""
       ),
       file = f.path,
@@ -45,8 +47,11 @@ function M.thread_entries(root, all)
     if all or t.status ~= "resolved" then
       local last = t.messages[#t.messages]
       local where = t.file
-      if pr and pr.kind == "pr" then
+      if session.is_snapshots(pr) then
         where = (t.side == "old" and "base/" or "head/") .. t.file
+        if pr.kind == "commits" then
+          where = (t.commit or pr.current) .. "/" .. where
+        end
       end
       local w = require("code-review").waiting(t)
       res[#res + 1] = {
@@ -58,6 +63,7 @@ function M.thread_entries(root, all)
         side = t.side or "new",
         line = t.range.start,
         tid = t.id,
+        commit = t.commit,
       }
     end
   end
@@ -88,7 +94,10 @@ end
 ---Open an entry: the PR diff at that side and line, or the project file.
 function M.open(root, e)
   local pr = session.load(root)
-  if pr and pr.kind == "pr" then
+  if session.is_snapshots(pr) then
+    if e.commit then
+      require("code-review.commits").ensure_current(root, e)
+    end
     require("code-review.diff").show_file(root, e.file, e.side, e.line)
   else
     vim.cmd.edit(vim.fn.fnameescape(root .. "/" .. e.file))
@@ -120,7 +129,8 @@ function M.pick(root, entries, title)
     local pr = session.load(root)
     fzf.fzf_exec(vim.tbl_map(function(e) return e.text end, entries), {
       prompt = title .. "> ",
-      cwd = (pr and pr.kind == "pr") and pr.cache or root, -- entries are relative to this, for the preview
+      -- entries are relative to this, for the preview
+      cwd = (pr and pr.kind == "pr") and pr.cache or (pr and pr.kind == "commits") and pr.cache_base or root,
       previewer = "builtin",
       actions = {
         default = function(selected)

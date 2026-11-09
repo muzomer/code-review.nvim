@@ -39,6 +39,10 @@ M.config = {
     find_thread = "<leader>ct", -- pick a thread
     next_file = "]f", -- PR review: next changed file
     prev_file = "[f", -- PR review: previous changed file
+    next_commit = "]C", -- commits review: next commit (]c / [c are Neovim's next / previous change)
+    prev_commit = "[C", -- commits review: previous commit
+    find_commit = "<leader>cC", -- commits review: pick a commit
+    commits = "<leader>co", -- start (or resume) reviewing the commits of the current branch, one at a time
     -- on a thread: in the thread window, the thread list (quickfix) and the conversation panel
     thread = {
       reply = { "r", "i" },
@@ -214,7 +218,7 @@ local function buf_info(buf)
   -- a unified PR view shows both sides of one file
   local u = vim.b[buf].code_review_unified
   if u then
-    return u.root, u.file, "both", true
+    return u.root, u.file, "both", true, u.commit
   end
   if vim.bo[buf].buftype ~= "" then
     return nil
@@ -225,9 +229,9 @@ local function buf_info(buf)
   end
   name = vim.fs.normalize(vim.fn.fnamemodify(name, ":p"))
   -- A PR snapshot: the session, file and side are encoded in its path.
-  local sroot, sfile, sside = session.infer(name)
+  local sroot, sfile, sside, scommit = session.infer(name)
   if sroot then
-    return sroot, sfile, sside, true
+    return sroot, sfile, sside, true, scommit
   end
   -- Outside a repo, match the CLI (which falls back to its cwd): use Neovim's
   -- cwd when the file is under it.
@@ -248,10 +252,11 @@ local function safe_read(root)
   return data
 end
 
-local function threads_for(data, rel, side)
+---@param commit? string a commit of a commits review: only its threads
+local function threads_for(data, rel, side, commit)
   local res = {}
   for _, t in ipairs(data.threads) do
-    if t.file == rel and (side == "both" or (t.side or "new") == (side or "new")) then
+    if t.file == rel and (side == "both" or (t.side or "new") == (side or "new")) and (not commit or t.commit == commit) then
       res[#res + 1] = t
     end
   end
@@ -507,7 +512,7 @@ local URGENCY = { CodeReviewNeedsUser = 4, CodeReviewNeedsAgent = 3, CodeReviewA
 
 ---@param reanchor? boolean relocate threads against buffer text first
 function M.render(buf, reanchor)
-  local root, rel, side, snapshot = buf_info(buf)
+  local root, rel, side, snapshot, commit = buf_info(buf)
   if not root then
     return
   end
@@ -523,6 +528,14 @@ function M.render(buf, reanchor)
       end
       map(km.next_file, 1, "Code review: next PR file")
       map(km.prev_file, -1, "Code review: previous PR file")
+      if commit then
+        for lhs, dir in pairs({ next_commit = 1, prev_commit = -1 }) do
+          if km[lhs] then
+            keys.set("n", km[lhs], function() require("code-review.commits").step(root, dir) end,
+              { buffer = buf, desc = dir > 0 and "Code review: next commit" or "Code review: previous commit" })
+          end
+        end
+      end
     end
   end
   M.watch(root)
@@ -530,7 +543,7 @@ function M.render(buf, reanchor)
   if not data then
     return
   end
-  local threads = threads_for(data, rel, side)
+  local threads = threads_for(data, rel, side, commit)
   if side == "both" and require("code-review.unified").is_since(buf) then
     -- the old column is your last review, not the PR base: base-side threads do not belong
     threads = vim.tbl_filter(function(t) return t.side ~= "old" end, threads)
@@ -539,12 +552,12 @@ function M.render(buf, reanchor)
     local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
     if anchor.reanchor_threads(vim.deepcopy(threads), lines) then
       try_update(root, function(d)
-        if not anchor.reanchor_threads(threads_for(d, rel, side), lines) then
+        if not anchor.reanchor_threads(threads_for(d, rel, side, commit), lines) then
           return store.UNCHANGED
         end
       end)
       data = safe_read(root) or data
-      threads = threads_for(data, rel, side)
+      threads = threads_for(data, rel, side, commit)
     end
   end
 
@@ -1282,7 +1295,8 @@ function M.goto_thread(win, root, t)
   api.nvim_set_current_win(win)
   local path = session.thread_path(root, t)
   local pr = session.load(root)
-  if pr and pr.kind == "pr" then
+  if session.is_snapshots(pr) then
+    require("code-review.commits").ensure_current(root, t)
     vim.cmd("normal! m'")
     require("code-review.diff").show_file(root, t.file, t.side or "new", t.range.start)
   elseif vim.fs.normalize(api.nvim_buf_get_name(0)) ~= path then
@@ -1330,6 +1344,8 @@ local HELP_GLOBAL = {
   { "inline", "show / hide conversations under the code" },
   { "find_thread", "pick a thread (with preview)" },
   { "find_file", "PR: pick a file (with preview)" },
+  { "commits", "review this branch's commits one at a time" },
+  { "find_commit", "commits: pick a commit" },
   { "list", "open threads → quickfix (waiting for you first)" },
   { "list_all", "all threads, resolved too → quickfix" },
   { "poke", "poke the agent (herdr, else background claude)" },
@@ -1337,6 +1353,8 @@ local HELP_GLOBAL = {
   { "auto_poke", "toggle: <C-s> also sends to the agent" },
   { "next_file", "PR: next unreviewed file" },
   { "prev_file", "PR: previous unreviewed file" },
+  { "next_commit", "commits: next commit" },
+  { "prev_commit", "commits: previous commit" },
   { "viewed", "PR: mark the file viewed and move on" },
   { "layout", "PR: split / unified diff" },
   { "recent", "resume a recent PR review" },
@@ -1451,7 +1469,7 @@ function M.help_lines(context)
   section("Anywhere", rows)
   vim.list_extend(lines, {
     "Commands: :CodeReview pr <url> · recent · reload · since · files [left|right|bottom|top]",
-    "          · layout [split|unified] · panel · find · threads [all] · list [all|yours] · poke [pick] · autopoke · chat · inline · stop",
+    "          · commits [range|next|prev|pick] · layout [split|unified] · panel · find · threads [all] · list [all|yours] · poke [pick] · autopoke · chat · inline · stop",
     "",
   })
   return lines
@@ -1546,7 +1564,7 @@ function M.lualine()
         yours = yours + 1
       end
     end
-    local parts = { string.format("%s/%s#%s", s.owner or "?", s.repo or "?", s.number or "?") }
+    local parts = { s.kind == "commits" and require("code-review.diff").label(s) or string.format("%s/%s#%s", s.owner or "?", s.repo or "?", s.number or "?") }
     if total > 0 then
       parts[#parts + 1] = string.format("%d/%d viewed", n_viewed, total)
     end
@@ -1710,7 +1728,7 @@ end
 ---({ c1, c2 }, from getpos()) is given.
 function M.add(line1, line2, cols)
   local buf = api.nvim_get_current_buf()
-  local root, rel, side = buf_info(buf)
+  local root, rel, side, _, commit = buf_info(buf)
   if not root then
     return notify("buffer is not a file inside a project", vim.log.levels.WARN)
   end
@@ -1755,6 +1773,7 @@ function M.add(line1, line2, cols)
         anchor = a,
         author = "user",
         body = body,
+        commit = commit,
       })
     end)
     if not saved then
@@ -2290,7 +2309,8 @@ function M.jump_yours(dir)
     return notify(string.format("no more threads waiting for you %s (%d in total)", dir > 0 and "below" or "above", #list))
   end
   local pr = session.load(root)
-  if pr and pr.kind == "pr" then
+  if session.is_snapshots(pr) then
+    require("code-review.commits").ensure_current(root, target)
     require("code-review.diff").show_file(root, target.file, target.side or "new", target.range.start)
   else
     vim.cmd.edit(vim.fn.fnameescape(root .. "/" .. target.file))
@@ -2394,6 +2414,21 @@ local subcommands = {
     M.jump(-1)
   end,
   copy = M.copy_prompt,
+  commits = function(o)
+    local arg = o and o.fargs and o.fargs[2]
+    local commits = require("code-review.commits")
+    local root = require("code-review.diff").where()
+    local s = root and session.load(root)
+    local here = s and s.kind == "commits" and root or nil
+    if arg == "next" or arg == "prev" or arg == "pick" then
+      here = here or session.local_dirs(commits.repo_root(vim.fn.getcwd()) or vim.fn.getcwd())
+      if arg == "pick" then
+        return commits.pick(here)
+      end
+      return commits.step(here, arg == "next" and 1 or -1)
+    end
+    commits.open(arg)
+  end,
   pr = function(o)
     local ref = o.fargs[2]
     if not ref then
@@ -2649,6 +2684,13 @@ function M.setup(opts)
   end
   if km.find_file then
     keys.set("n", km.find_file, function() subcommands.find() end, { desc = "Code review: pick a PR file" })
+  end
+  if km.commits then
+    keys.set("n", km.commits, function() subcommands.commits() end, { desc = "Code review: review commits one at a time" })
+  end
+  if km.find_commit then
+    keys.set("n", km.find_commit, function() subcommands.commits({ fargs = { "commits", "pick" } }) end,
+      { desc = "Code review: pick a commit" })
   end
   if km.find_thread then
     keys.set("n", km.find_thread, function() subcommands.threads() end, { desc = "Code review: pick a thread" })

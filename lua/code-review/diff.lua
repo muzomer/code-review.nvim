@@ -233,14 +233,19 @@ local function entry(s, file)
 end
 
 local function label(s)
+  if s.kind == "commits" then
+    return string.format("%s %s", vim.fs.basename(s.repo or ""), s.range or "")
+  end
   return string.format("%s/%s#%d", s.owner, s.repo, s.number)
 end
+
+M.label = label
 
 ---Show the PR's changed files in the sidebar (and open it unless `open` is false).
 ---@param current? string the file shown in the diff
 function M.files(root, open, current)
   local s = session.load(root)
-  if not s or s.kind ~= "pr" then
+  if not session.is_snapshots(s) then
     return notify("not in a PR review", vim.log.levels.WARN)
   end
   if open ~= false then
@@ -618,6 +623,25 @@ end
 ---Lines of the PR description page (markdown).
 ---@return string[]
 function M.description_lines(s)
+  if s.kind == "commits" then
+    local c
+    for i, x in ipairs(s.commits or {}) do
+      if x.sha == s.current then
+        c = vim.tbl_extend("keep", { i = i }, x)
+      end
+    end
+    c = c or { sha = s.head_sha or "", subject = s.title or "", i = 0 }
+    local lines = { "# " .. (c.subject ~= "" and c.subject or "(no subject)"), "",
+      string.format("`%s` · commit %d/%d of `%s`%s", c.sha:sub(1, 7), c.i, #(s.commits or {}), s.range or "",
+        c.author and (" · " .. c.author) or ""), }
+    if c.date then
+      lines[#lines + 1] = c.date
+    end
+    vim.list_extend(lines, { "", "---", "" })
+    local body = vim.trim(c.body or "")
+    vim.list_extend(lines, vim.split(body ~= "" and body or "_No description._", "\n", { plain = true }))
+    return lines
+  end
   local meta = { string.format("`%s`", label(s)) }
   if s.author then
     meta[#meta + 1] = "by @" .. s.author
@@ -643,7 +667,7 @@ local desc_win
 ---Show the PR title and description in a read-only markdown float.
 function M.description(root)
   local s = root and session.load(root)
-  if not s or s.kind ~= "pr" then
+  if not session.is_snapshots(s) then
     return notify("not in a PR review", vim.log.levels.WARN)
   end
   if desc_win and api.nvim_win_is_valid(desc_win) then
@@ -665,7 +689,7 @@ function M.description(root)
     col = math.floor((vim.o.columns - width) / 2),
     style = "minimal",
     border = "rounded",
-    title = " PR description  (q to close) ",
+    title = s.kind == "commits" and " Commit message  (q to close) " or " PR description  (q to close) ",
     title_pos = "center",
   })
   vim.wo[desc_win].wrap = true
@@ -741,6 +765,10 @@ function M.step(dir, include_viewed)
       other = other + 1
     end
   end
+  if s.kind == "commits" and other == 0 then
+    -- this commit is done this way: go on to the next (or previous) one
+    return require("code-review.commits").step(root, dir)
+  end
   local msg = dir > 0 and "last file of the PR" or "first file of the PR"
   if skipped > 0 then
     msg = string.format("no more unreviewed files this way (%d viewed skipped)", skipped)
@@ -777,6 +805,15 @@ function M.summary_text(root)
     end
   end
   local text = string.format("Review of %s: %d/%d files viewed", label(s), n_viewed, #(s.files or {}))
+  if s.kind == "commits" then
+    local commits, done = require("code-review.commits"), 0
+    for _, cm in ipairs(s.commits or {}) do
+      if commits.reviewed(root, cm) then
+        done = done + 1
+      end
+    end
+    text = string.format("Review of %s: %d/%d commits reviewed", label(s), done, #(s.commits or {}))
+  end
   local open = yours + agents
   if open + resolved == 0 then
     return text .. " · no comments."
@@ -817,6 +854,10 @@ function M.maybe_summary(root, force)
       return false
     end
   end
+  if c.s.kind == "commits" and require("code-review.commits").first_unreviewed(root) then
+    summary_shown[root] = nil
+    return false
+  end
   if summary_shown[root] and not force then
     return false
   end
@@ -830,7 +871,7 @@ end
 ---@param file? string defaults to the file on screen
 function M.toggle_viewed(root, file)
   local s = session.load(root)
-  if not s or s.kind ~= "pr" then
+  if not session.is_snapshots(s) then
     return notify("not in a PR review", vim.log.levels.WARN)
   end
   if not file then
@@ -846,6 +887,9 @@ function M.toggle_viewed(root, file)
   vim.cmd("redrawstatus!")
   sidebar.render(root)
   if now then
+    if s.kind == "commits" then
+      return M.commit_done(root, s)
+    end
     if M.maybe_summary(root) then
       return
     end
@@ -854,6 +898,28 @@ function M.toggle_viewed(root, file)
     M.maybe_summary(root) -- not complete any more: the next completion is announced again
     notify(file .. ": marked as not viewed")
   end
+end
+
+---After a file of a commits review was marked viewed: the next file not viewed
+---yet, or, when the commit is done, the next commit (a summary after the last).
+function M.commit_done(root, s)
+  local commits = require("code-review.commits")
+  local i = commits.index_of(s, s.current) or 0
+  if not commits.reviewed(root, s.commits[i] and vim.tbl_extend("force", s.commits[i], { files = s.files }) or { files = s.files }) then
+    return M.step(1)
+  end
+  for j = i + 1, #s.commits do
+    if not commits.reviewed(root, s.commits[j]) then
+      notify(string.format("✓ commit %d/%d reviewed", i, #s.commits))
+      return commits.show(root, s.commits[j].sha)
+    end
+  end
+  local first = commits.first_unreviewed(root)
+  if first then
+    local k = commits.index_of(s, first)
+    return notify(string.format("✓ commit %d/%d reviewed · commit %d/%d is not reviewed yet", i, #s.commits, k, #s.commits))
+  end
+  notify("✓ " .. M.summary_text(root))
 end
 
 ---Show or hide the sidebar of the review. With `position` ("left", "right",
@@ -906,7 +972,7 @@ end
 function M.resume(root)
   require("code-review").setup_once()
   local s = session.load(root)
-  if not s or s.kind ~= "pr" then
+  if not session.is_snapshots(s) then
     return notify("no such review", vim.log.levels.WARN)
   end
   M.refresh_cache(root)
@@ -1155,6 +1221,9 @@ end
 ---Fetch the PR again (new commits), keeping the previous version for "since".
 function M.reload(root)
   local s = session.load(root)
+  if s and s.kind == "commits" then
+    return require("code-review.commits").open(s.range, s.repo) -- the range may have new or rewritten commits
+  end
   if not s or s.kind ~= "pr" then
     return notify("not in a PR review", vim.log.levels.WARN)
   end
@@ -1274,8 +1343,12 @@ function M.attach_quickfix(group)
           if type(ud) == "table" and ud.root then
             root, file = ud.root, ud.file
           elseif item.bufnr and item.bufnr > 0 then
-            root, file, side = session.infer(api.nvim_buf_get_name(item.bufnr))
+            local commit
+            root, file, side, commit = session.infer(api.nvim_buf_get_name(item.bufnr))
             line = item.lnum
+            if commit then
+              require("code-review.commits").ensure_current(root, { commit = commit })
+            end
           end
         end
         if root and session.load(root) then
