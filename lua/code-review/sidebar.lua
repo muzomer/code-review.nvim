@@ -131,7 +131,7 @@ local function thread_counts(root, commit, by)
   local ok, data = pcall(store.read, root)
   local res = {}
   for _, t in ipairs(ok and data.threads or {}) do
-    if t.status ~= "resolved" and (not commit or t.commit == commit) then
+    if t.status ~= "resolved" and (not commit or t.commit == commit) and not store.is_general(t) then
       local c = res[by == "commit" and (t.commit or "") or t.file] or { open = 0, yours = 0 }
       c.open = c.open + 1
       if t.needs == "user" then

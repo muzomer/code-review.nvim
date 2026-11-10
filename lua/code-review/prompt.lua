@@ -166,11 +166,18 @@ function M.build(root, opts)
   end
 
   local blocks = {}
+  local any_general = false
   for _, t in ipairs(fresh) do
     local followup = seen[t.id] ~= nil or vim.iter(t.messages):any(function(m) return m.author ~= "user" end)
     counts[followup and "followup" or "new"] = counts[followup and "followup" or "new"] + 1
+    local general = store.is_general(t)
+    any_general = any_general or general
     local where = string.format("%s:%d-%d%s", t.file, t.range.start, t.range["end"], t.side == "old" and " (old side, base commit)" or "")
-    if commits and t.commit then
+    if general then
+      where = commits and string.format("the commits %s as a whole (a conversation, not about a line)", commits.range)
+        or pr and string.format('the whole PR "%s" (a conversation, not about a line)', cut(pr.title or "", 80))
+        or "the whole change (a conversation, not about a line)"
+    elseif commits and t.commit then
       where = where .. string.format(' in commit %s ("%s")', t.commit:sub(1, 12), cut(subjects[t.commit] or "?", 60))
       if t.side == "old" then
         where = where:gsub(" %(old side, base commit%)", " (old side: the commit's parent)")
@@ -214,6 +221,13 @@ function M.build(root, opts)
   if #blocks > 0 then
     lines[#lines + 1] = table.concat(blocks, "\n\n")
     lines[#lines + 1] = ""
+  end
+  if any_general then
+    lines[#lines + 1] = "The conversation about the whole " .. (commits and "range" or pr and "PR" or "change")
+      .. " asks for insight, not a code change: answer from the "
+      .. (pr and string.format("description and code (`%s diff` starts with the PR description and lists the snapshots)", cli)
+        or commits and "commits (`git log -p` on the range)" or "code")
+      .. ", reply in that thread like any other, do not edit files for it and do not resolve it."
   end
   if #older > 0 then
     lines[#lines + 1] = string.format("%s from before: %s (`%s show <id>`).", #fresh > 0 and "Also still open" or "Open",

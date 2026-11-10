@@ -662,46 +662,115 @@ function M.description_lines(s)
   return lines
 end
 
-local desc_win
+local desc -- { win, buf, root }: the description window
 
----Show the PR title and description in a read-only markdown float.
+---The conversation about the whole review, under the description.
+---@return string[] lines, table? thread
+local function conversation_lines(root, what)
+  local ok, data = pcall(require("code-review.store").read, root)
+  local store = require("code-review.store")
+  local t = ok and store.general(data) or nil
+  local lines = { "", "---", "", "## Conversation", "" }
+  if not t then
+    lines[#lines + 1] = string.format("_Ask the agent anything about %s: press `a`._", what)
+    return lines
+  end
+  return vim.list_extend(lines, require("code-review").messages_markdown(t)), t
+end
+
+local function render_description(root, keep_cursor)
+  local s = session.load(root)
+  if not (desc and api.nvim_win_is_valid(desc.win) and s) then
+    return
+  end
+  local what = s.kind == "commits" and "these commits" or "this PR"
+  local lines = M.description_lines(s)
+  local conv = conversation_lines(root, what)
+  vim.list_extend(lines, conv)
+  local win, buf = desc.win, desc.buf
+  local cur = api.nvim_win_get_cursor(win)
+  local at_end = cur[1] >= api.nvim_buf_line_count(buf)
+  vim.bo[buf].modifiable = true
+  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  require("code-review").color_authors(buf, lines)
+  api.nvim_win_set_height(win, math.max(5, math.min(#lines + 1, vim.o.lines - 6)))
+  if keep_cursor and not at_end then
+    pcall(api.nvim_win_set_cursor, win, { math.min(cur[1], #lines), cur[2] })
+  elseif keep_cursor ~= nil then
+    api.nvim_win_set_cursor(win, { #lines, 0 }) -- follow the conversation
+  end
+end
+
+---Show the description window again when it is open (for `root`, when given).
+function M.refresh_description(root)
+  if desc and (not root or desc.root == root) and api.nvim_win_is_valid(desc.win) then
+    root = desc.root
+    render_description(root, true)
+  end
+end
+
+---Show the PR title and description (or the commit message) in a markdown
+---float, with the conversation about the whole review under it.
 function M.description(root)
   local s = root and session.load(root)
   if not session.is_snapshots(s) then
     return notify("not in a PR review", vim.log.levels.WARN)
   end
-  if desc_win and api.nvim_win_is_valid(desc_win) then
-    api.nvim_win_close(desc_win, true)
+  if desc and api.nvim_win_is_valid(desc.win) then
+    api.nvim_win_close(desc.win, true)
   end
-  local lines = M.description_lines(s)
   local buf = api.nvim_create_buf(false, true)
-  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].filetype = "markdown"
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = "wipe"
-  local width = math.min(100, vim.o.columns - 6)
-  local height = math.max(5, math.min(#lines + 1, vim.o.lines - 8))
-  desc_win = api.nvim_open_win(buf, true, {
+  local width = math.max(20, vim.o.columns - 4) -- as wide as the editor: long lines and tables fit
+  local height = 5
+  local origin = api.nvim_get_current_win() -- focus goes back there (asking opens another float meanwhile)
+  local win = api.nvim_open_win(buf, true, {
     relative = "editor",
     width = width,
     height = height,
-    row = math.floor((vim.o.lines - height) / 2) - 1,
+    row = 2,
     col = math.floor((vim.o.columns - width) / 2),
     style = "minimal",
     border = "rounded",
-    title = s.kind == "commits" and " Commit message  (q to close) " or " PR description  (q to close) ",
+    title = s.kind == "commits" and " Commit message " or " PR description ",
     title_pos = "center",
+    footer = " a ask · e edit your question · s send · q close ",
+    footer_pos = "right",
   })
-  vim.wo[desc_win].wrap = true
-  vim.wo[desc_win].linebreak = true
-  vim.wo[desc_win].conceallevel = 2
-  for _, key in ipairs({ "q", "<Esc>" }) do
-    vim.keymap.set("n", key, function()
-      if api.nvim_win_is_valid(desc_win) then
-        api.nvim_win_close(desc_win, true)
-      end
-    end, { buffer = buf, desc = "Close PR description" })
+  desc = { win = win, buf = buf, root = root }
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+  vim.wo[win].conceallevel = 2
+  render_description(root)
+  local cr = require("code-review")
+  local o = { buffer = buf, nowait = true }
+  local function close()
+    if api.nvim_win_is_valid(win) then
+      api.nvim_win_close(win, true)
+    end
+    if api.nvim_win_is_valid(origin) then
+      api.nvim_set_current_win(origin)
+    end
   end
+  for _, key in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", key, close, vim.tbl_extend("force", o, { desc = "Close the description" }))
+  end
+  local function ask()
+    cr.ask(root, function() render_description(root, false) end)
+  end
+  vim.keymap.set("n", "a", ask, vim.tbl_extend("force", o, { desc = "Ask the agent about the whole review" }))
+  vim.keymap.set("n", "r", ask, vim.tbl_extend("force", o, { desc = "Ask the agent about the whole review" }))
+  vim.keymap.set("n", "e", function()
+    local ok, data = pcall(require("code-review.store").read, root)
+    local t = ok and require("code-review.store").general(data)
+    if t then
+      cr.edit(root, t.id)
+    end
+  end, vim.tbl_extend("force", o, { desc = "Edit your last question" }))
+  vim.keymap.set("n", "s", function() cr.poke(root) end, vim.tbl_extend("force", o, { desc = "Send to the agent" }))
 end
 
 ---The PR file the user is on: the buffer's file in a diff pane, the row under

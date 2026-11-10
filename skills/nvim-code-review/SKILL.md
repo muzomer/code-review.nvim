@@ -61,6 +61,11 @@ first.
   say whether the concern still applies; do not guess a new location.
 - You may open a new thread to flag something to the user:
   `code-review add src/foo.lua 42 48 "This loop is O(n^2); ok?"`
+- One thread may be about the whole review instead of a line, shown as
+  `(the whole review: …)`: the user asks about the PR or the change as a whole
+  ("what does this do?", "is this risky?"). Read the description and the diff
+  before answering, reply in it like in any thread, do not edit files for it,
+  and never resolve it.
 - You cannot edit, reopen, or delete threads. Those are the user's.
 - `code-review show <id>` prints one thread; `code-review list --all`
   includes resolved ones.

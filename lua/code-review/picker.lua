@@ -44,7 +44,7 @@ function M.thread_entries(root, all)
   local pr = session.load(root)
   local res = {}
   for _, t in ipairs(ok and data.threads or {}) do
-    if all or t.status ~= "resolved" then
+    if (all or t.status ~= "resolved") and not store.is_general(t) then
       local last = t.messages[#t.messages]
       local where = t.file
       if session.is_snapshots(pr) then

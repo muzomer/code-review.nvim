@@ -116,7 +116,8 @@ The changed files appear in a sidebar on the left, as a folder tree:
 | `<leader>ca`                                         | comment, on either side                                                 |
 | `<leader>cu` (`:CodeReview layout [split\|unified]`) | side by side ↔ one unified column, like GitHub (`]c` / `[c`: changes) |
 | `<leader>cg` (`:CodeReview find`)                    | pick a changed file, with preview                                       |
-| `<leader>cd` (`:CodeReview description`)             | the PR title and description                                            |
+| `<leader>cd` (`:CodeReview description`)             | the PR title and description, with your conversation about the PR below |
+| `:CodeReview ask [question]`                         | ask the agent about the PR as a whole (`a` in the description window)   |
 | `<leader>cR` (`:CodeReview recent`)                  | resume a recent PR review from its snapshots (no network)               |
 | `:CodeReview reload` (`U` in the sidebar)            | fetch the PR again after new commits; your last version is kept         |
 | `:CodeReview since` (`S` in the sidebar)             | what changed since your last review (previous head → current head)      |
@@ -127,6 +128,21 @@ before opens at once and is checked for new commits in the background. Agents
 read the same snapshots: `code-review --pr REF diff` prints their paths,
 `code-review --pr REF file <path>` fetches any other file. For lualine:
 `lualine_x = { require("code-review").lualine }`.
+
+### Asking about the whole PR
+
+Not every question is about a line: "what does this PR do?", "what could
+break?", "why the new cache?". In the description window (`<leader>cd`), the
+description is at the top and the conversation about the PR is below it. Press
+`a` to ask; the question goes to the agent right away, and its answer shows up
+under your question while the window is open. Keep asking with `a`: it is one
+conversation per review, so the agent sees what was said before. `e` edits your
+last question until the agent answers, `q` closes the window.
+
+The conversation is a thread like the others for the agent (`code-review list`
+shows it as about the whole review), but it stays out of the thread list and the
+pickers, since it has no line. In a commits review the same window shows the
+commit message, and the conversation is about the range.
 
 ## Reviewing commits one at a time
 

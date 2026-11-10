@@ -178,12 +178,13 @@ function M.flush_notifications()
   pending_notes = {}
   if #notes == 1 then
     local n = notes[1]
-    return vim.notify(M.one_line(string.format("code-review: %s on %s:%d: %s", n.author, n.file, n.line, n.text)))
+    local on = n.file and string.format("%s:%d", n.file, n.line) or ("the review (" .. (keys.label((M.config.keymaps or {}).description) or ":CodeReview description") .. ")")
+    return vim.notify(M.one_line(string.format("code-review: %s on %s: %s", n.author, on, n.text)))
   end
   local authors, where = {}, {}
   for _, n in ipairs(notes) do
     authors[n.author] = true
-    where[#where + 1] = string.format("%s:%d", n.file:match("[^/]+$"), n.line)
+    where[#where + 1] = n.file and string.format("%s:%d", n.file:match("[^/]+$"), n.line) or "the review"
   end
   local who = vim.tbl_keys(authors)
   table.sort(who)
@@ -778,7 +779,8 @@ local function on_store_changed(root)
     now[t.id] = #t.messages
     local last = t.messages[#t.messages]
     if M.config.notify and prev and last and last.author ~= "user" and (prev[t.id] or 0) < #t.messages then
-      queue_notification({ author = last.author, file = t.file, line = t.range.start, text = first_line(last.body) })
+      queue_notification({ author = last.author, file = not store.is_general(t) and t.file or nil, line = t.range.start,
+        text = first_line(last.body) })
     end
   end
   seen[root] = now
@@ -791,6 +793,10 @@ local function on_store_changed(root)
   local panel = package.loaded["code-review.panel"]
   if panel and panel.current() == root then
     panel.render()
+  end
+  local diff = package.loaded["code-review.diff"]
+  if diff then
+    diff.refresh_description(root)
   end
 end
 
@@ -880,7 +886,7 @@ function M.input_footer()
   return string.format(" %s save · %s save + send to agent%s ", save, alt, cancel and (" · " .. cancel .. " cancel") or "")
 end
 
-local function input(title, on_submit, initial)
+local function input(title, on_submit, initial, footer)
   local buf = api.nvim_create_buf(false, true)
   vim.bo[buf].filetype = "markdown"
   vim.bo[buf].bufhidden = "wipe"
@@ -901,9 +907,14 @@ local function input(title, on_submit, initial)
     col = 0,
     border = "rounded",
     title = " " .. title .. " ",
-    footer = M.input_footer(),
+    footer = footer or M.input_footer(),
     footer_pos = "right",
   })
+  -- a text box, not a code window: no columns from the user's 'number' / 'signcolumn' / ...
+  for k, v in pairs({ number = false, relativenumber = false, signcolumn = "no", foldcolumn = "0", statuscolumn = "",
+    list = false, wrap = true, linebreak = true }) do
+    vim.wo[win][k] = v
+  end
   if initial then
     local n = api.nvim_buf_line_count(buf)
     api.nvim_win_set_cursor(win, { n, #api.nvim_buf_get_lines(buf, n - 1, n, false)[1] })
@@ -923,7 +934,7 @@ local function input(title, on_submit, initial)
     local text = vim.trim(table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
     close()
     if text ~= "" and on_submit(text, (alt == true) ~= (M.config.auto_poke == true)) == false then
-      input(title, on_submit, text) -- not saved: keep what was typed
+      input(title, on_submit, text, footer) -- not saved: keep what was typed
     end
   end
   local o = { buffer = buf, nowait = true }
@@ -993,8 +1004,9 @@ function M.thread_markdown(t)
   local loc = r.start == r["end"] and tostring(r.start) or (r.start .. "-" .. r["end"])
   local quote = M.quote(t, 60)
   local lines = {
-    string.format("`%s:%s`%s · %s · needs %s%s", t.file, loc, quote and (" on " .. quote) or "", t.status, t.needs,
-      t.approved and " · change approved" or ""),
+    store.is_general(t) and string.format("`the whole review` · %s · needs %s", t.status, t.needs)
+      or string.format("`%s:%s`%s · %s · needs %s%s", t.file, loc, quote and (" on " .. quote) or "", t.status, t.needs,
+        t.approved and " · change approved" or ""),
     "",
   }
   local code = (t.anchor or {}).text or {}
@@ -1004,6 +1016,12 @@ function M.thread_markdown(t)
     vim.list_extend(lines, code)
     lines[#lines + 1] = fence
   end
+  return vim.list_extend(lines, M.messages_markdown(t))
+end
+
+---The messages of thread `t` as markdown, separated by rules.
+function M.messages_markdown(t)
+  local lines = {}
   for i, m in ipairs(t.messages) do
     if i > 1 then
       vim.list_extend(lines, { "", "---" })
@@ -1232,6 +1250,10 @@ function M.refresh_views()
   if panel then
     panel.render()
   end
+  local diff = package.loaded["code-review.diff"]
+  if diff then
+    diff.refresh_description() -- "… is replying" in the conversation under the description
+  end
 end
 
 ---Visible threads of the project in review order: by file, then line.
@@ -1239,7 +1261,7 @@ local function project_threads(root)
   local data = safe_read(root)
   local res = {}
   for _, t in ipairs(data and data.threads or {}) do
-    if t.status ~= "resolved" or M.config.show_resolved then
+    if (t.status ~= "resolved" or M.config.show_resolved) and not store.is_general(t) then
       res[#res + 1] = t
     end
   end
@@ -1293,6 +1315,9 @@ end
 ---open its conversation.
 function M.goto_thread(win, root, t)
   api.nvim_set_current_win(win)
+  if store.is_general(t) then
+    return require("code-review.diff").description(root)
+  end
   local path = session.thread_path(root, t)
   local pr = session.load(root)
   if session.is_snapshots(pr) then
@@ -1359,7 +1384,7 @@ local HELP_GLOBAL = {
   { "layout", "PR: split / unified diff" },
   { "recent", "resume a recent PR review" },
   { "panel", "threads: float / docked conversation panel" },
-  { "description", "PR: title and description" },
+  { "description", "PR: title and description; a there asks the agent about the whole PR" },
   { "help", "this help" },
 }
 
@@ -1793,6 +1818,28 @@ function M.add(line1, line2, cols)
   end)
 end
 
+---Ask the agent about the review as a whole (a question not about a line).
+---@param on_saved? fun() after the question is saved
+function M.ask(root, on_saved)
+  local s = session.load(root)
+  local what = s and s.kind == "commits" and "these commits" or "this PR"
+  local ik = keys.group("input")
+  local send = table.concat(vim.list_extend(vim.deepcopy(keys.list(ik.submit)), keys.list(ik.submit_alt)), " / ")
+  input("Ask about " .. what, function(body)
+    local saved = try_update(root, function(data)
+      return store.ask(data, "user", body)
+    end)
+    if not saved then
+      return false
+    end
+    after_write(root)
+    if on_saved then
+      on_saved()
+    end
+    M.poke(root) -- a question is asked to be answered: always sent (asks which agent when none is chosen)
+  end, nil, " " .. send .. " send to the agent ")
+end
+
 function M.reply(root, tid)
   input("Reply to " .. tid, function(body, now)
     local gone
@@ -1953,7 +2000,8 @@ function M.list_threads(threads, mode)
   local res = {}
   for _, t in ipairs(threads) do
     local w = M.waiting(t)
-    if mode == "yours" and w.yours or mode ~= "yours" and (all or t.status ~= "resolved") then
+    if store.is_general(t) then -- not on a line: it lives in the description window
+    elseif mode == "yours" and w.yours or mode ~= "yours" and (all or t.status ~= "resolved") then
       res[#res + 1] = t
     end
   end
@@ -2443,6 +2491,22 @@ local subcommands = {
   end,
   description = function()
     require("code-review.diff").description(session.infer(api.nvim_buf_get_name(0)) or current_root())
+  end,
+  ask = function(o)
+    local diff = require("code-review.diff")
+    local root = diff.where() or session.infer(api.nvim_buf_get_name(0)) or current_root()
+    if not session.is_snapshots(root and session.load(root)) then
+      return notify("not in a PR or commits review", vim.log.levels.WARN)
+    end
+    local question = vim.trim(table.concat(vim.list_slice(o and o.fargs or {}, 2), " "))
+    diff.description(root)
+    if question == "" then
+      return M.ask(root)
+    end
+    if try_update(root, function(data) return store.ask(data, "user", question) end) then
+      after_write(root)
+      M.poke(root)
+    end
   end,
   viewed = function()
     local root = require("code-review.diff").where()

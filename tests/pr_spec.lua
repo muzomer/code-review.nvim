@@ -105,6 +105,56 @@ describe("PR review", function()
     eq(api.nvim_win_is_valid(win), false)
   end)
 
+  it("the description holds a conversation about the whole PR, away from the line lists", function()
+    local poke = require("code-review.poke")
+    local send, poked = poke.send, 0
+    poke.send = function() poked = poked + 1 end
+    local from = api.nvim_get_current_win()
+    diff.description(root)
+    local win = api.nvim_get_current_win()
+    local buf = api.nvim_win_get_buf(win)
+    local function text() return table.concat(api.nvim_buf_get_lines(buf, 0, -1, false), "\n") end
+    assert(text():find("## Conversation", 1, true) and text():find("press `a`", 1, true), text())
+    local opts = { number = vim.o.number, relativenumber = vim.o.relativenumber, signcolumn = vim.o.signcolumn }
+    vim.o.number, vim.o.relativenumber, vim.o.signcolumn = true, true, "yes:1" -- as in many configs
+    feed("a")
+    eq(vim.fn.getwininfo(api.nvim_get_current_win())[1].textoff, 0) -- the box starts at its left edge
+    for k, v in pairs(opts) do vim.o[k] = v end
+    submit("what does this PR do?")
+    eq(poked, 1) -- a question is always sent
+    eq(api.nvim_get_current_win(), win)
+    local threads = vim.tbl_filter(store.is_general, store.read(root).threads)
+    eq(#threads, 1)
+    local t = threads[1]
+    eq({ t.needs, t.messages[1].body }, { "agent", "what does this PR do?" })
+    assert(text():find("what does this PR do?", 1, true), text())
+    eq(api.nvim_win_get_cursor(win)[1], api.nvim_buf_line_count(buf)) -- follows the conversation
+    -- the agent sees it as a question about the PR, with where the description is
+    local prompt = require("code-review.prompt").build(root, { all = true })
+    assert(prompt:find('the whole PR "Tweak"', 1, true), prompt)
+    assert(prompt:find("diff` starts with the PR description", 1, true), prompt)
+    -- the agent answers with the CLI; the open window shows it; the CLI's re-anchoring leaves it open
+    local code = cli({ "--pr", "acme/api#5", "reply", t.id, "It fixes y." })
+    eq(code, 0)
+    local _, out = cli({ "--pr", "acme/api#5", "list" })
+    assert(out:find("the whole review", 1, true), out)
+    ac.after_write(root)
+    assert(text():find("It fixes y.", 1, true), text())
+    eq(store.read(root).threads[1].status, "open")
+    -- a second question goes into the same conversation
+    feed("a")
+    submit("is it risky?")
+    eq(#vim.tbl_filter(store.is_general, store.read(root).threads), 1)
+    eq(#store.find(store.read(root), t.id).messages, 3)
+    -- not in the quickfix list or the thread picker: it is not on a line
+    eq(#ac.list_threads(store.read(root).threads, "all"), 0)
+    eq(#require("code-review.picker").thread_entries(root, true), 0)
+    feed("q")
+    eq(api.nvim_get_current_win(), from) -- back where <leader>cd was pressed, though asking opened a float
+    poke.send = send
+    store.update(root, function(d) d.threads = {} end)
+  end)
+
   it("says so when a PR has no description", function()
     local lines = diff.description_lines({ title = "T", owner = "o", repo = "r", number = 1, body = "  \n", base_ref = "main", head_ref = "x" })
     eq(lines[#lines], "_No description provided._")

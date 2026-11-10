@@ -371,6 +371,35 @@ function M.set_approved(t, on)
   M.refresh_needs(t)
 end
 
+---The conversation about the review as a whole (questions not about a line):
+---one per review, a thread with `general = true`, no file and no lines.
+function M.is_general(t)
+  return t.general == true
+end
+
+---@return table? thread
+function M.general(data)
+  for _, t in ipairs(data.threads) do
+    if M.is_general(t) then
+      return t
+    end
+  end
+end
+
+---Add `body` to the conversation about the whole review, starting it if needed.
+---@return string id
+function M.ask(data, author, body)
+  local t = M.general(data)
+  if not t then
+    t = { id = new_id(data), general = true, file = "", range = { start = 0, ["end"] = 0 }, status = "open", messages = {} }
+    data.threads[#data.threads + 1] = t
+  end
+  M.add_message(t, author, body)
+  t.status = "open"
+  M.refresh_needs(t)
+  return t.id
+end
+
 ---@param o {file:string, side?:"old"|"new", base?:string, start:integer, ["end"]:integer, start_col?:integer, end_col?:integer, anchor:table, author:string, body:string}
 function M.add_thread(data, o)
   local t = {
