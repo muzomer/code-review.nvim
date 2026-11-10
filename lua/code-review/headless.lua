@@ -140,6 +140,7 @@ function M.args(root, text, opts)
     new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
     -- a PR has no checkout to change; a local review only where the reviewer allows it
     edit = not pr and may_edit(root) and work or nil,
+    pr = pr or nil,
   })
   vim.list_extend(args, cfg().args or {})
   return args

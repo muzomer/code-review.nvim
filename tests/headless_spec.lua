@@ -104,6 +104,25 @@ describe("background agent", function()
     for _, a in ipairs(args) do
       assert(not a:find("^Edit") and not a:find("^Write"), vim.inspect(args))
     end
+    -- without a checkout it may search the repository on GitHub
+    assert(vim.tbl_contains(args, "Bash(gh search code:*)"), vim.inspect(args))
+  end)
+
+  case("extra_tools are added to the list, which keeps its own rules", function()
+    local root = project()
+    local before = ac.config.headless
+    ac.config.headless = { extra_tools = { "Bash(gh pr view:*)" } }
+    local args = headless.args(root, "x", { new_id = "id" })
+    assert(vim.tbl_contains(args, "Bash(gh pr view:*)") and vim.tbl_contains(args, "Bash(code-review:*)"), vim.inspect(args))
+    assert(not vim.tbl_contains(args, "Bash(gh search code:*)"), vim.inspect(args)) -- a local review has a checkout
+    store.update(root, function(d) store.set_approved(d.threads[1], true) end)
+    args = headless.args(root, "x", { new_id = "id" })
+    assert(vim.tbl_contains(args, "Edit(/" .. vim.fs.normalize(root) .. "/**)"), vim.inspect(args)) -- still there
+    ac.config.headless = { allowed_tools = { "Read" }, extra_tools = { "Bash(gh pr view:*)" } }
+    args = headless.args(root, "x", { new_id = "id" })
+    eq({ arg_after({ args = args }, "--allowedTools"), args[vim.fn.index(args, "Read") + 2] }, { "Read", "Bash(gh pr view:*)" })
+    eq(ac.config.headless.allowed_tools, { "Read" }) -- the config is not changed
+    ac.config.headless = before
   end)
 
   case("the next poke resumes the same session", function()

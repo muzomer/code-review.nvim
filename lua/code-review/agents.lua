@@ -62,6 +62,8 @@ M.claude = {
   fork = true,
   subagents = true,
   DEFAULT_TOOLS = { "Bash(code-review:*)", "Read", "Grep", "Glob" },
+  -- a PR review has no checkout: GitHub's code search finds what is not in the PR (read-only)
+  PR_TOOLS = { "Bash(gh search code:*)" },
   args = function(o)
     local c = o.cfg
     local args = { o.cmd, "-p", o.prompt, "--output-format", "stream-json", "--verbose" }
@@ -81,7 +83,13 @@ M.claude = {
         -- absolute path; an Edit rule covers Write too.
         tools[#tools + 1] = "Edit(/" .. vim.fs.normalize(o.edit) .. "/**)"
       end
+      if o.pr then
+        vim.list_extend(tools, M.claude.PR_TOOLS)
+      end
+    else
+      tools = vim.deepcopy(tools)
     end
+    vim.list_extend(tools, c.extra_tools or {}) -- added to either list
     if #tools > 0 then
       args[#args + 1] = "--allowedTools"
       vim.list_extend(args, tools)

@@ -238,8 +238,11 @@ function M.build(root, opts)
     .. " resolve with `%s resolve <id>` only once the request is settled. `code-review skill` explains the workflow.", cli, author, cli)
   if pr then
     lines[#lines + 1] = string.format("There is no checkout: `%s diff` prints where the base/head snapshots of the changed files are;"
-      .. " for any other file run `%s file <path>` and read the path it prints. You cannot change the PR,"
-      .. " so answer with explanations or suggested code (a ```suggestion block replaces the commented lines).", cli, cli)
+      .. " for any other file run `%s file <path>` and read the path it prints. To find code that is not in"
+      .. " the PR (callers, definitions, other uses), search the repository on GitHub: `gh search code \"<query>\" --repo %s/%s`"
+      .. " (it searches the default branch, not the PR head). You cannot change the PR,"
+      .. " so answer with explanations or suggested code (a ```suggestion block replaces the commented lines).", cli, cli,
+      pr.owner, pr.repo)
   elseif commits then
     lines[#lines + 1] = string.format("These comments are on commits of the repository at %s, reviewed one commit at a time;"
       .. " each thread names its commit (`git show <sha>` shows it).", commits.repo)

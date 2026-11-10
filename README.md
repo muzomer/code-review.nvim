@@ -244,7 +244,7 @@ the agent runs:
 
   | Agent      | Runs                                          | Resumes                          | Notes                                                         |
   | ---------- | --------------------------------------------- | -------------------------------- | ------------------------------------------------------------- |
-  | `claude`   | `claude -p --output-format stream-json`       | `--resume <id>`                  | tools: `headless.allowed_tools`                               |
+  | `claude`   | `claude -p --output-format stream-json`       | `--resume <id>`                  | tools: `headless.allowed_tools`, `headless.extra_tools`       |
   | `codex`    | `codex exec --json --sandbox workspace-write` | `codex exec resume <id>`         | `permission_mode` sets `--sandbox`                            |
   | `opencode` | `opencode run --format json`                  | `--session <id>`                 | `permission_mode = "auto"` adds `--auto`                      |
   | `gemini`   | `gemini -p -o stream-json`                    | `-r latest` (in the review root) | needs `permission_mode = "yolo"` (or a policy) to run the CLI |
@@ -267,10 +267,16 @@ A PR review never changes code.
 How this is enforced: Claude may always run the `code-review` CLI and read files
 (`Read`, `Grep`, `Glob`). A run with an approved thread also gets
 `Edit(//<project>/**)`, which covers `Write`: only inside the reviewed project,
-never in the directory a fork started in. The permission is per run, so other
+never in the directory a fork started in. In a PR review it may also run
+`gh search code`, to find callers and definitions outside the PR (GitHub
+searches the default branch). The permission is per run, so other
 threads in that run rely on the prompt. Other agents rely on the prompt alone,
 unless their own sandbox (`headless.permission_mode`) is stricter.
-`headless.allowed_tools` replaces Claude's list.
+`headless.extra_tools` adds rules to Claude's list, e.g.
+`{ "Bash(gh pr view:*)" }`; `headless.allowed_tools` replaces the list (and
+drops the approved-change and PR rules). An interactive session you poke
+through herdr asks in its own terminal: allow commands there, or in
+`permissions.allow` of `~/.claude/settings.json`.
 
 ## How it works
 
@@ -373,7 +379,9 @@ require("code-review").setup({
   headless = {                  -- the background agent
     agent = "claude",           -- "claude", "codex", "opencode", "gemini"
     cmd = nil,                  -- executable (default: the agent's own)
-    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit(//<project>/**)" when a change is approved)
+    allowed_tools = nil,        -- claude: default { "Bash(code-review:*)", "Read", "Grep", "Glob" } (+ "Edit(//<project>/**)" when a change is approved,
+                                -- + "Bash(gh search code:*)" in a PR review)
+    extra_tools = {},           -- claude: more rules added to the list, e.g. { "Bash(gh pr view:*)" }
     permission_mode = nil,      -- claude --permission-mode, codex --sandbox, gemini --approval-mode,
                                 -- opencode "auto" (--auto)
     args = {},                  -- extra arguments for every run

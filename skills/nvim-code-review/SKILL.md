@@ -84,8 +84,11 @@ to **every** command, e.g.
 - A file that is not in the snapshot (a caller, a helper, config) is fetched on
   demand: `code-review --pr REF file src/utils.py` prints a path you can read.
   `--side old` fetches the base-commit version. `code-review --pr REF ls src/`
-  lists a directory at the PR head. You cannot grep the whole repository; say so
-  when a question needs it.
+  lists a directory at the PR head.
+- To find code that is not in the PR (callers, definitions, other uses), search
+  the repository on GitHub: `gh search code "<query>" --repo owner/repo`. It
+  searches the default branch, not the PR head: code the PR adds is in the
+  snapshots. Then fetch the files it finds with `code-review --pr REF file`.
 - Threads on removed or changed code may be on the **old side** (shown as
   `(OLD side @abc1234)`): their line numbers refer to the base-commit snapshot.
   To open one yourself: `code-review --pr REF add <old path> 12 "..." --side old`.

@@ -102,7 +102,9 @@ M.config = {
   headless = { -- the background agent: one resumable conversation per review
     agent = "claude", -- "claude", "codex", "opencode" or "gemini"
     cmd = nil, -- its executable (default: the agent's own: claude, codex, opencode, gemini)
-    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob, plus Edit/Write inside the project in a local review (not a PR)
+    allowed_tools = nil, -- claude: default code-review CLI + Read/Grep/Glob, plus Edit/Write inside the project in a local review
+    -- (once a change is approved), plus `gh search code` in a PR review; a list here replaces all of it
+    extra_tools = {}, -- claude: rules added to the list above, e.g. { "Bash(gh pr view:*)" }
     permission_mode = nil, -- claude: --permission-mode (e.g. "acceptEdits"); codex: --sandbox (default "workspace-write");
     -- gemini: --approval-mode (e.g. "yolo" to let it run the CLI); opencode: "auto" = --auto
     args = {}, -- extra arguments for every run
