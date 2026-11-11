@@ -3,6 +3,7 @@ local store = require("code-review.store")
 local anchor = require("code-review.anchor")
 local session = require("code-review.session")
 local github = require("code-review.github")
+local ghcomments = require("code-review.ghcomments")
 local uv = vim.uv
 
 local M = {}
@@ -20,6 +21,8 @@ Usage:
   code-review diff [--json]                   PR review: changed files and snapshot paths
   code-review file <path> [--side old|new]    PR review: print a file's snapshot path (fetches it if needed)
   code-review ls [dir]                        PR review: list a directory of the PR head
+  code-review github [--all] [--cached] [--json]
+                                              PR review: comments others left on GitHub (read-only)
   code-review skill        print agent instructions
 
 `list` shows unresolved threads by default. A body of "-" is read from stdin.
@@ -28,7 +31,7 @@ Options: --root DIR (default: $NVIM_CODE_REVIEW_ROOT or the git/jj root of cwd)
          --pr REF  review a PR opened with `:CodeReview pr REF` instead of a project
 Needs a GitHub token for PRs: $GH_TOKEN, $GITHUB_TOKEN, or `gh auth login`.]]
 
-local BOOL = { json = true, all = true, help = true, ["no-reanchor"] = true }
+local BOOL = { json = true, all = true, help = true, ["no-reanchor"] = true, cached = true }
 
 local function parse(argv)
   local pos, flags = {}, {}
@@ -302,6 +305,7 @@ function cmds.fetch(root, pos, flags)
   if not r then
     error(ferr, 0)
   end
+  ghcomments.fetch(r) -- best effort: `github` says when they could not be loaded
   local s = session.load(r)
   emit(flags, { root = r, files = #s.files }, string.format("Fetched %s/%s#%d: %d changed files. Use --pr %s/%s#%d", ref.owner, ref.repo, ref.number, #s.files, ref.owner, ref.repo, ref.number))
 end
@@ -351,9 +355,55 @@ function cmds.diff(root, pos, flags)
       lines[#lines + 1] = "    new: " .. f.new
     end
   end
+  local gh = ghcomments.load(root)
+  if gh then
+    local c = ghcomments.counts(root, gh)
+    value.github_comments = c
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(
+      "Review comments on GitHub: %d open, %d outdated, %d resolved (read them: code-review --pr <ref> github)",
+      c.open, c.outdated, c.resolved)
+  end
   lines[#lines + 1] = ""
   lines[#lines + 1] = "Other files: code-review --pr <ref> file <path>; comment on removed code with --side old."
   emit(flags, value, table.concat(lines, "\n"))
+end
+
+function cmds.github(root, pos, flags)
+  need_pr(root)
+  local data, err
+  if not flags.cached then
+    data, err = ghcomments.fetch(root)
+  end
+  if not data then
+    data = ghcomments.load(root)
+    if not data then
+      error("could not load the review comments from GitHub: " .. tostring(err), 0)
+    end
+    if err then
+      io.stderr:write(string.format("code-review: could not refresh them (%s); showing the copy from %s\n", err, data.fetched_at or "?"))
+    end
+  end
+  local shown = vim.tbl_filter(function(t) return flags.all or t.status ~= "resolved" end, data.threads)
+  local c = ghcomments.counts(root, data)
+  local head = {
+    string.format("Review comments on GitHub: %d open, %d outdated, %d resolved%s.", c.open, c.outdated, c.resolved,
+      flags.all and "" or " (resolved ones: --all)"),
+    "Read-only: you cannot answer or resolve them. Line numbers are in the snapshots (`diff`).",
+    "",
+  }
+  if (data.total or 0) > #data.threads then
+    table.insert(head, 2, string.format("Only the first %d of %d threads were fetched.", #data.threads, data.total))
+  end
+  local value = vim.tbl_map(function(t) -- the status and lines as shown: no line for a thread not on it any more
+    local v = vim.deepcopy(t)
+    v.status = ghcomments.state(root, t)
+    if not ghcomments.placed(t, session.lines(root, t.file, { side = t.side })) then
+      v.start, v["end"] = nil, nil
+    end
+    return v
+  end, shown)
+  emit(flags, value, table.concat(vim.list_extend(head, ghcomments.text(root, { threads = shown }, true)), "\n"))
 end
 
 function cmds.file(root, pos, flags)

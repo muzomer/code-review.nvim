@@ -89,6 +89,11 @@ to **every** command, e.g.
   the repository on GitHub: `gh search code "<query>" --repo owner/repo`. It
   searches the default branch, not the PR head: code the PR adds is in the
   snapshots. Then fetch the files it finds with `code-review --pr REF file`.
+- Comments other reviewers left on the PR on GitHub:
+  `code-review --pr REF github` (`--all` includes resolved ones). They are
+  context, not threads of yours: you may refer to them in a reply ("@bob
+  raised this too"), but you cannot answer or resolve them, and `list` never
+  shows them.
 - Threads on removed or changed code may be on the **old side** (shown as
   `(OLD side @abc1234)`): their line numbers refer to the base-commit snapshot.
   To open one yourself: `code-review --pr REF add <old path> 12 "..." --side old`.

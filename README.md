@@ -100,13 +100,14 @@ nvim https://github.com/acme/api/pull/12               # same, if the plugin is 
 The changed files appear in a sidebar on the left, as a folder tree:
 
 ```
- acme/api#12 · 3/35 viewed
+ acme/api#12 · 3/35 viewed · ◎3 on GitHub
  ▾ src/auth/
-   ▶✓ M jwt.py        +40 -12  ✎2
-      A keys.py        +3       ✎1!
+   ▶✓ M jwt.py        +40 -12  ✎2   ◎1
+      A keys.py        +3       ✎1!  ◎2
 ```
 
-`▶` file in the diff · `✓` viewed · `M/A/D/R` change · `✎2` open threads · `!` waiting for you
+`▶` file in the diff · `✓` viewed · `M/A/D/R` change · `✎2` open threads · `!` waiting for you ·
+`◎1` open review comments from GitHub
 
 | Key / command                                        | Action                                                                  |
 | ---------------------------------------------------- | ----------------------------------------------------------------------- |
@@ -123,11 +124,28 @@ The changed files appear in a sidebar on the left, as a folder tree:
 | `:CodeReview since` (`S` in the sidebar)             | what changed since your last review (previous head → current head)      |
 | `q` / `:CodeReview files`                            | hide / show the sidebar                                                 |
 
-Comments stay on your machine; nothing is posted to GitHub. A PR you reviewed
+Your comments stay on your machine; nothing is posted to GitHub. A PR you reviewed
 before opens at once and is checked for new commits in the background. Agents
 read the same snapshots: `code-review --pr REF diff` prints their paths,
 `code-review --pr REF file <path>` fetches any other file. For lualine:
 `lualine_x = { require("code-review").lualine }`.
+
+### Review comments from GitHub
+
+What others already said on the PR shows up beside your own threads, so you do
+not repeat a point and can ask the agent about theirs. The review threads are
+fetched with the PR and drawn on the lines they are about, marked `◎`
+(`@bob: why 20?`), and the sidebar counts them per file (`◎2`). Open one with `<leader>cr`: a read-only window shows the
+code and the conversation, and `o` opens it on GitHub. Resolved ones are hidden
+like yours (`show_resolved`). A thread is drawn only while its line still holds
+the code it was written on. Threads on code that changed since, and comments on
+a whole file, are listed for the agent but not drawn. They are fetched again when
+you reopen the review and while it is open, with the check for new commits.
+
+They are not your threads: you cannot answer them from here, they never wait
+for the agent, and `code-review list` leaves them out. The agent reads them with
+`code-review --pr REF github` (`--all` for resolved ones), and `diff` says how
+many there are. Turn them off with `github_comments = false`.
 
 ### Asking about the whole PR
 
@@ -196,6 +214,7 @@ code-review resolve t_a3f9 "Fixed in utils.lua"
 code-review add src/foo.lua 40 44 "This is O(n^2); ok?"
 code-review skill                      # instructions for the agent
 code-review --pr acme/api#12 list      # a PR review: the same commands with --pr
+code-review --pr acme/api#12 github    # what others said on GitHub (read-only)
 ```
 
 Give your agent the instructions once: copy `skills/nvim-code-review` to
@@ -359,7 +378,8 @@ require("code-review").setup({
 
   -- Threads
   show_resolved = false,        -- show resolved threads in the code
-  signs = { user = "▍", agent = "◆", resolved = "✓", outdated = "?" },
+  github_comments = true,       -- PR review: show the review comments others left on GitHub (read-only)
+  signs = { user = "▍", agent = "◆", resolved = "✓", outdated = "?", github = "◎" },
   conversation = "float",       -- open threads in a "float" or a docked "panel"
   panel_width = nil,            -- panel width (default: ~35% of the screen, 40..70)
   inline_threads = false,       -- whole conversations under the code (toggle: keymaps.inline)

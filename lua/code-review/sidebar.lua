@@ -3,8 +3,10 @@
 --
 --    acme/api#12 · 3/35 viewed
 --   ▾ src/auth/
---   ▶✓ M jwt.py        +40 -12  ✎2
+--   ▶✓ M jwt.py        +40 -12  ✎2  ◎1
 --      A keys.py        +3       ✎1!
+--
+-- ✎ your threads (! one waits for you), ◎ open review comments from GitHub.
 --
 -- In a commits review the commits come first, the current one opened up:
 --
@@ -297,6 +299,12 @@ function M.render(root, shown)
   local all_files = M.ordered(s)
   local viewed = require("code-review.diff").viewed(root)
   local counts = thread_counts(root, is_commits and (s.current or "") or nil)
+  local cr = require("code-review")
+  local gh_counts, gh_total = {}, 0
+  if not is_commits and cr.config.github_comments then
+    gh_counts, gh_total = require("code-review.ghcomments").file_counts(root)
+  end
+  local gh_sign = cr.config.signs.github or "◎"
   local n_viewed = 0
   for _, f in ipairs(all_files) do
     if viewed[f.path] then
@@ -330,18 +338,21 @@ function M.render(root, shown)
 
   -- The name column takes what is left of the window after the fixed columns
   -- (indent, marks, status, counts, threads); longer names are shortened.
-  local w_threads, has_dirs = 0, false
+  local w_threads, w_gh, has_dirs = 0, 0, false
   for _, f in ipairs(files) do
     local c = counts[f.path]
     if c then
       w_threads = math.max(w_threads, #("  ✎" .. c.open) - 2 + (c.yours > 0 and 1 or 0)) -- ✎ is 3 bytes, 1 cell
+    end
+    if gh_counts[f.path] then
+      w_gh = math.max(w_gh, 2 + vim.fn.strdisplaywidth(gh_sign) + #tostring(gh_counts[f.path]))
     end
     has_dirs = has_dirs or f.path:find("/", 1, true) ~= nil
   end
   -- icons get a fixed slot of 2 cells + space: Nerd Font glyphs often draw wider than they count
   local use_icons = M.icon("x.lua") ~= nil
   local nest = is_commits and 4 or 0 -- files sit under their commit
-  local reserved = nest + (has_dirs and 2 or 0) + 2 + 3 + (use_icons and 3 or 0) + (1 + w_add) + (1 + w_del) + w_threads
+  local reserved = nest + (has_dirs and 2 or 0) + 2 + 3 + (use_icons and 3 or 0) + (1 + w_add) + (1 + w_del) + w_threads + w_gh
   w_name = math.max(8, math.min(w_name, api.nvim_win_get_width(win) - reserved))
   local function shorten(name)
     if vim.fn.strdisplaywidth(name) <= w_name then
@@ -386,6 +397,9 @@ function M.render(root, shown)
       { " " .. string.format("%s/%s#%d", s.owner, s.repo, s.number), "Title" },
       { string.format(" · %d/%d viewed", n_viewed, #all_files), "Comment" },
     }
+    if gh_total > 0 then
+      header[#header + 1] = { string.format(" · %s%d on GitHub", gh_sign, gh_total), "CodeReviewGitHub" }
+    end
   end
   if mode ~= "all" then
     header[#header + 1] = { string.format(" · %s: %d", FILTER_LABEL[mode], #files), "WarningMsg" }
@@ -432,11 +446,16 @@ function M.render(root, shown)
           { " " .. pad((f.additions or 0) > 0 and ("+" .. f.additions) or "", w_add), "CodeReviewStatAdd" },
           { " " .. pad((f.deletions or 0) > 0 and ("-" .. f.deletions) or "", w_del), "CodeReviewStatDel" },
         })
+        local gh = gh_counts[f.path]
         if c then
           pieces[#pieces + 1] = { "  ✎" .. c.open, c.yours > 0 and "CodeReviewNeedsUser" or "CodeReviewNeedsAgent" }
           if c.yours > 0 then
             pieces[#pieces + 1] = { "!", "CodeReviewNeedsUser" }
           end
+        end
+        if gh then -- after your threads, in a column of its own
+          local used = c and (#("  ✎" .. c.open) - 2 + (c.yours > 0 and 1 or 0)) or 0
+          pieces[#pieces + 1] = { string.rep(" ", w_threads - used) .. "  " .. gh_sign .. gh, "CodeReviewGitHub" }
         end
         add(pieces, { kind = "file", path = f.path })
       end

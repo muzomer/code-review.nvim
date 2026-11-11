@@ -79,6 +79,7 @@ M.config = {
     },
   },
   show_resolved = false,
+  github_comments = true, -- PR review: show the review comments others left on GitHub (read-only)
   inline_threads = false, -- show whole conversations under the commented lines (toggle: keymaps.inline)
   inline_max_lines = 12, -- longest inline conversation before it is cut ("open the thread for more")
   notify = true, -- notify when an agent replies
@@ -116,7 +117,7 @@ M.config = {
   sidebar_height = nil, -- height when bottom/top (default: 30% of the screen, 6..15 lines)
   diff_colors = true, -- PR diff palette: true/"auto" = from your colorscheme, "github-dark" = GitHub Dark Default, false = Neovim's own
   add_bin_to_path = true, -- so agents started from inside Neovim find the CLI
-  signs = { user = "▍", agent = "◆", resolved = "✓", outdated = "?" },
+  signs = { user = "▍", agent = "◆", resolved = "✓", outdated = "?", github = "◎" },
 }
 
 local ns = api.nvim_create_namespace("code-review")
@@ -542,6 +543,18 @@ function M.render(buf, reanchor)
     end
   end
   M.watch(root)
+  if snapshot and not commit then
+    local gh = require("code-review.ghcomments")
+    if M.config.github_comments then
+      gh.render(buf, root, rel, side, {
+        sign = M.config.signs.github or "◎",
+        show_resolved = M.config.show_resolved,
+        since = side == "both" and require("code-review.unified").is_since(buf),
+      })
+    else
+      gh.clear(buf)
+    end
+  end
   local data = safe_read(root)
   if not data then
     return
@@ -731,6 +744,11 @@ local function render_root(root)
       end
     end
   end
+end
+
+---Redraw every buffer of the review at `root` (e.g. after GitHub comments arrived).
+function M.render_root(root)
+  render_root(root)
 end
 
 -- After a save, extmarks know where the commented code went: persist that.
@@ -2377,6 +2395,16 @@ local subcommands = {
     M.add(o.line1, o.line2)
   end,
   open = function()
+    local _, tid, many = M.thread_at_cursor()
+    if not tid and not many then -- no thread of yours here: one from GitHub?
+      local gh = require("code-review.ghcomments")
+      local buf = api.nvim_get_current_buf()
+      local root = buf_info(buf)
+      local ids = root and gh.at(buf, api.nvim_win_get_cursor(0)[1] - 1) or {}
+      if ids[1] then
+        return gh.open(root, ids[1])
+      end
+    end
     M.with_thread_at_cursor(M.open_thread)
   end,
   inline = function()
@@ -2557,6 +2585,7 @@ local function highlights()
   set("CodeReviewAgent", "DiagnosticHint")
   set("CodeReviewVirt", "Comment")
   set("CodeReviewDim", "NonText")
+  set("CodeReviewGitHub", "Special") -- review comments others left on GitHub
   set("CodeReviewFlash", "IncSearch")
   -- the selected text of a thread: underlined, so it shows on diff colors too
   local function fg(name)

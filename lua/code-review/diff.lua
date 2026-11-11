@@ -1194,6 +1194,28 @@ local function show_arrived(root, file)
   })
 end
 
+local gh_warned = {} -- root -> true: could not load its GitHub comments (said once)
+
+---Fetch the PR's review comments from GitHub in the background; redraw when they changed.
+function M.refresh_github(root)
+  local cr = require("code-review")
+  if not cr.config.github_comments then
+    return
+  end
+  require("code-review.ghcomments").fetch_async(root, function(data, err, changed)
+    if data then
+      if changed then
+        cr.render_root(root)
+        sidebar.render(root)
+      end
+    elseif not gh_warned[root] then -- once: e.g. an old GitHub Enterprise without review threads
+      gh_warned[root] = true
+      vim.notify(cr.one_line("code-review: could not load the review comments from GitHub: " .. tostring(err)),
+        vim.log.levels.WARN)
+    end
+  end)
+end
+
 M.render_every_ms = 100 -- sidebar redraws while files arrive (a big PR sends thousands)
 
 ---Download (or re-download) the PR of `root` in the background and keep the
@@ -1257,6 +1279,7 @@ function M.fetch(root, ref)
       updates[r] = nil
       M.refresh_cache(r)
       sidebar.render(r)
+      M.refresh_github(r) -- after the files: a failure here must not hold up (or fail) the review
       local s = session.load(r)
       local bad = vim.tbl_keys(failed or {})
       if #bad > 0 then
@@ -1313,6 +1336,7 @@ function M.check_updates(root, force)
     return
   end
   last_check[root] = now
+  M.refresh_github(root) -- new comments come without new commits
   github.check_update(s, function(info)
     if not info or (info.head_sha == s.head_sha and info.base_sha == s.base_sha) then
       return

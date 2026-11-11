@@ -109,6 +109,24 @@ local function request_args(token, host, path, opts)
   }
 end
 
+local function graphql_url(host)
+  return host == "github.com" and "https://api.github.com/graphql" or ("https://" .. host .. "/api/graphql")
+end
+
+-- A GraphQL query: POSTed as JSON; the URL stays last like in request_args.
+local function graphql_args(token, host, query, variables)
+  return {
+    "curl", "-sS", "-L", "-X", "POST",
+    "-H", "Authorization: Bearer " .. token,
+    "-H", "Content-Type: application/json",
+    "-w", "\n%{http_code}",
+    "--connect-timeout", "10",
+    "--max-time", "60",
+    "--data-binary", vim.json.encode({ query = query, variables = variables }),
+    graphql_url(host),
+  }
+end
+
 local function http_status(res)
   return tonumber(((res and res.stdout or ""):match("\n(%d+)$")))
 end
@@ -186,6 +204,39 @@ function M.get(host, path, opts)
     end
   end
   return interpret(res, path, opts)
+end
+
+---GraphQL errors come with HTTP 200: turn them into an error too.
+local function graphql_result(data, err)
+  if not data then
+    return nil, err
+  end
+  if type(data.errors) == "table" and data.errors[1] then
+    return nil, "GitHub GraphQL: " .. tostring(data.errors[1].message or "error")
+  end
+  return data.data
+end
+
+---Run a GraphQL query (blocking); transient failures are retried like M.get.
+---@return table? data the `data` of the response
+---@return string? err
+function M.graphql(host, query, variables)
+  local token = M.token()
+  if not token then
+    return nil, NO_TOKEN
+  end
+  local args = graphql_args(token, host, query, variables)
+  local res
+  for attempt = 1, M.retries + 1 do
+    res = M.run(args)
+    if not transient(res) then
+      break
+    end
+    if attempt <= M.retries then
+      vim.uv.sleep(M.retry_delay_ms * attempt)
+    end
+  end
+  return graphql_result(interpret(res, "/graphql", {}))
 end
 
 local default_run = M.run
@@ -488,6 +539,26 @@ function M.get_async(host, path, opts, cb)
         return vim.defer_fn(try, M.retry_delay_ms * attempt)
       end
       cb(interpret(res, path, opts))
+    end)
+  end
+  try()
+end
+
+---GraphQL without blocking. cb(data?, err?)
+function M.graphql_async(host, query, variables, cb)
+  local token = M.token()
+  if not token then
+    return cb(nil, NO_TOKEN)
+  end
+  local args = graphql_args(token, host, query, variables)
+  local attempt = 0
+  local function try()
+    attempt = attempt + 1
+    M.run_async(args, function(res)
+      if transient(res) and attempt <= M.retries then
+        return vim.defer_fn(try, M.retry_delay_ms * attempt)
+      end
+      cb(graphql_result(interpret(res, "/graphql", {})))
     end)
   end
   try()

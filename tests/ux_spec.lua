@@ -483,15 +483,20 @@ describe("UX", function()
     end)
 
     case("a PR reviewed before opens from its snapshots straight away", function()
-      local calls, run = 0, github.run
+      local calls, comments, run = 0, 0, github.run
       github.run = function(args)
-        calls = calls + 1
+        if args[#args]:find("/graphql$") then
+          comments = comments + 1
+        else
+          calls = calls + 1
+        end
         return run(args)
       end
       diff.open("acme/ux#41")
       github.run = run
       assert(wins_by_side().new, "shown at once")
       eq(calls, 1) -- only the background check for new commits
+      eq(comments, 1) -- and for new review comments on GitHub
     end)
   end)
 
