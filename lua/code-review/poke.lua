@@ -182,18 +182,28 @@ function M.pick(root, on_pick, listed)
   if #agents == 0 then
     return notify("no other agent is running in herdr", vim.log.levels.WARN)
   end
-  local resume = require("code-review").suspend_thread() -- the picker would overlap it
-  vim.ui.select(agents, {
-    prompt = "Poke which agent?",
-    format_item = function(a)
-      return string.format("%-40s %-8s %s", a.title, a.status, a.cwd)
-    end,
-  }, function(choice)
-    resume()
-    if choice and on_pick(choice) then
-      save_target(root, choice)
-    end
-  end)
+  local function open()
+    local resume = require("code-review").suspend_thread() -- the picker would overlap it
+    vim.ui.select(agents, {
+      prompt = "Poke which agent?",
+      format_item = function(a)
+        return string.format("%-40s %-8s %s", a.title, a.status, a.cwd)
+      end,
+    }, function(choice)
+      resume()
+      if choice and on_pick(choice) then
+        save_target(root, choice)
+      end
+    end)
+  end
+  -- Sent from the comment box (<M-s> in insert mode): its `stopinsert` only
+  -- applies once that key's mapping returns, and would then knock a picker that
+  -- opened meanwhile (fzf-lua's terminal) out of its input. Open it after that.
+  if vim.api.nvim_get_mode().mode:sub(1, 1) == "i" then
+    vim.schedule(open)
+  else
+    open()
+  end
 end
 
 local asked = {} -- root → true: choose_if_unset already asked in this Neovim
@@ -330,7 +340,17 @@ function M.send(root, opts)
     isolate = "fork"
   end
   if not prompt.build(root) then
-    return nothing_waits()
+    if not opts.pick then
+      return nothing_waits()
+    end
+    -- choosing the agent again needs nothing to send: remember it for later
+    if mode == "headless" then
+      return notify("config.agent is \"headless\": comments always go to the background agent")
+    end
+    return M.pick(root, function(target)
+      notify(target.title .. " gets your comments from now on")
+      return true
+    end)
   end
   local function follow(target, before)
     if config.progress ~= false then

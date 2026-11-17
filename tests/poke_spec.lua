@@ -76,6 +76,19 @@ describe("poke", function()
     restore()
   end)
 
+  it("pick chooses the agent even when no comment is waiting", function()
+    fake()
+    local r = tmp_project({ ["f.lua"] = { "one" } }) -- no comments at all
+    ac.poke(r, { pick = true })
+    eq(picks, 1)
+    eq(#prompts(), 0) -- nothing to send
+    eq(poke.saved_target(r).pane_id, "w1:p1")
+    ac.poke(r) -- a plain poke still says there is nothing to send
+    eq(picks, 1)
+    assert(table.concat(notes, "\n"):find("no comment is waiting", 1, true), vim.inspect(notes))
+    restore()
+  end)
+
   it("hides the thread window while the picker is up, then brings it back", function()
     fake()
     local tid = store.read(root).threads[1].id
@@ -100,6 +113,36 @@ describe("poke", function()
     assert(vim.wait(500, function() return #thread_wins() == 1 end), "thread window did not come back")
     for _, w in ipairs(thread_wins()) do
       api.nvim_win_close(w, true)
+    end
+    api.nvim_set_current_win(src)
+    restore()
+  end)
+
+  it("<M-s> from the comment box opens the agent picker out of insert mode", function()
+    fake()
+    os.remove(store.paths(root) .. "/poke-target.json") -- no agent chosen yet
+    vim.cmd.edit(root .. "/f.lua")
+    local src = api.nvim_get_current_win()
+    api.nvim_win_set_cursor(0, { 2, 0 })
+    local mode, box_open
+    vim.ui.select = function(items, _, cb)
+      picks = picks + 1
+      -- a picker such as fzf-lua starts typing into its window right away: the comment
+      -- box's `stopinsert` must already be done, or it ends the picker's input instead
+      mode = api.nvim_get_mode().mode
+      box_open = #vim.tbl_filter(function(w) return api.nvim_win_get_config(w).relative ~= "" end, api.nvim_list_wins()) > 0
+      cb(items[1])
+    end
+    ac.add(2, 2)
+    vim.cmd.stopinsert() -- as typed: insert mode entered by a key, so <M-s> runs inside it
+    api.nvim_feedkeys(api.nvim_replace_termcodes("awhy two?<M-s>", true, false, true), "x", false)
+    assert(vim.wait(500, function() return picks == 1 end), "no picker")
+    eq({ mode, box_open }, { "n", false })
+    eq(#prompts(), 1) -- the chosen agent got the comment
+    for _, w in ipairs(api.nvim_list_wins()) do
+      if api.nvim_win_get_config(w).relative ~= "" then
+        api.nvim_win_close(w, true)
+      end
     end
     api.nvim_set_current_win(src)
     restore()
