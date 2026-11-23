@@ -1377,6 +1377,10 @@ end
 -- Help ------------------------------------------------------------------------------
 
 local HELP_GLOBAL = {
+  { "commits", "review this branch's commits one at a time" },
+  { "next_commit", "commits: next commit" },
+  { "prev_commit", "commits: previous commit" },
+  { "find_commit", "commits: pick a commit" },
   { "add", "comment on the line / selection" },
   { "open", "open the thread under the cursor" },
   { "edit", "edit your last comment (until the agent replies)" },
@@ -1389,22 +1393,18 @@ local HELP_GLOBAL = {
   { "inline", "show / hide conversations under the code" },
   { "find_thread", "pick a thread (with preview)" },
   { "find_file", "PR: pick a file (with preview)" },
-  { "commits", "review this branch's commits one at a time" },
-  { "find_commit", "commits: pick a commit" },
   { "list", "open threads → quickfix (waiting for you first)" },
   { "list_all", "all threads, resolved too → quickfix" },
   { "poke", "poke the agent (herdr, else background claude)" },
   { "output", "show / hide the agent's live output" },
   { "auto_poke", "toggle: <C-s> also sends to the agent" },
-  { "next_file", "PR: next unreviewed file" },
-  { "prev_file", "PR: previous unreviewed file" },
-  { "next_commit", "commits: next commit" },
-  { "prev_commit", "commits: previous commit" },
-  { "viewed", "PR: mark the file viewed and move on" },
+  { "next_file", "PR: next unreviewed file · commits: next file, past the last the next commit" },
+  { "prev_file", "PR: previous unreviewed file · commits: previous file, past the first the previous commit" },
+  { "viewed", "PR: mark the file viewed and move on · commits: after the last file, the next commit" },
   { "layout", "PR: split / unified diff" },
   { "recent", "resume a recent PR review" },
   { "panel", "threads: float / docked conversation panel" },
-  { "description", "PR: title and description; a there asks the agent about the whole PR" },
+  { "description", "PR: title and description; a there asks the agent about the whole PR · commits: the commit message" },
   { "help", "this help" },
 }
 
@@ -1503,6 +1503,27 @@ function M.help_lines(context)
       end
     end
     section(ctx.title, rows)
+  end
+  if context == "sidebar" then
+    -- the sidebar of a commits review also lists commits
+    local root = vim.b.code_review_sidebar
+    local s = root and require("code-review.session").load(root)
+    if s and s.kind == "commits" then
+      local km, rows = M.config.keymaps or {}, {}
+      local sb = keys.group("sidebar")
+      local function add(label, what)
+        if label then
+          rows[#rows + 1] = { label, what }
+        end
+      end
+      add(keys.label(sb.open), "on a commit: show it; on a file: open it")
+      add(keys.label(km.next_commit), "next commit")
+      add(keys.label(km.prev_commit), "previous commit")
+      add(keys.label(km.find_commit), "pick a commit from a list")
+      add(keys.label(sb.reload), "read the range again (new or rewritten commits)")
+      add(keys.label(sb.description), "the commit message")
+      section("Commits review", rows)
+    end
   end
   local km, rows = M.config.keymaps or {}, {}
   for _, item in ipairs(HELP_GLOBAL) do
